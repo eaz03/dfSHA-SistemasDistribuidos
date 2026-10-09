@@ -1,0 +1,8 @@
+proto
+syntax = "proto3";
+
+package dfsha;
+
+// Client <-> Superpeer. RPCs are added one step at a time.
+service Superpeer {
+}
