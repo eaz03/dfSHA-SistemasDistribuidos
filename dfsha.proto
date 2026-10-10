@@ -1,8 +1,22 @@
-proto
 syntax = "proto3";
 
 package dfsha;
 
-// Client <-> Superpeer. RPCs are added one step at a time.
 service Superpeer {
+  rpc Stat(PathRequest) returns (Attr);
+  rpc ListDir(PathRequest) returns (DirListing);
+}
+
+message PathRequest {
+  string path = 1;
+}
+
+message Attr {
+  bool   is_dir = 1;
+  int64  size   = 2;
+  double mtime  = 3;
+}
+
+message DirListing {
+  repeated string names = 1;     // "repeated" = a list
 }

@@ -1,41 +1,41 @@
+"""
+Cliente para interactuar con el sistema de archivos distribuido.
+"""
 
-import os
+import grpc
 
-import grpc, posixpath
-from dfsha.proto import dfsha_pb2 as pb, dfsha_pb2_grpc as rpc
+import dfsha_pb2 as pb
+import dfsha_pb2_grpc as rpc
 
+class DFSClient:
+    """Se comunica con los superpeers por gRPC"""
 
-class Client:
-    def __init__(self, superpeers):
-        self.superpeers = superpeers
-        self.token = None
-        self._connect_to_superpeer()
+    def __init__(self, superpeers, token=None, timeout=5):
+        self.superpeers = list(superpeers)
+        self.token = token
+        self.timeout = timeout
+        self.addr = None
+        self.channel = None
+        self.stub = None
+        self._connect()
 
-    def _connect_to_superpeer(self):
-        for superpeer in self.superpeers:
+    def _connect(self):
+        """Itera a través de la lista de superpeers y se conecta al primero que esté disponible"""
+        for addr in self.superpeers:
+            # AÑADIR TLS, y Autenticación con token
+            channel = grpc.insecure_channel(addr)  
             try:
-                # CONNECT_TO_SUPERPEER
-                print(f"Connecting to superpeer {superpeer}...")
-                return
+                grpc.channel_ready_future(channel).result(timeout=self.timeout)
+            except grpc.FutureTimeoutError:
+                channel.close()
+                continue
+            self.addr, self.channel = addr, channel
+            self.stub = rpc.SuperpeerStub(channel)
+            return
+        raise ConnectionError(f"no superpeer reachable: {self.superpeers}")
 
-            except Exception as e:
-                print(f"Failed to connect to superpeer {superpeer}: {e}")
-        return ConnectionError("no superpeer reachable")
+    def stat(self, path):
+        return self.stub.Stat(pb.PathRequest(path=path), timeout=self.timeout)
 
-    def login(self, username, password):
-        # LOGIN
-        print(f"Logging in as {username}...")
-        self.token = "dummy_token"  # Replace with actual token retrieval logic
-        return self.token
-
-    def ls(self, flags, path):
-        # LIST_FILES
-        print(f"Listing files in {path} with flags {flags}...")
-        return ["file1.txt", "file2.txt"]  # Replace with actual file listing logic
-
-    def mkdir(self, path, dirname):
-        # CREATE_DIRECTORY
-        print(f"Creating directory {dirname} in {path}...")
-        return True  # Replace with actual directory creation logic
-
-    def 
+    def ls(self, path):
+        return list(self.stub.ListDir(pb.PathRequest(path=path), timeout=self.timeout).names)
