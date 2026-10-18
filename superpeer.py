@@ -9,18 +9,22 @@ import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
 from errors import translate_file_system_errors_to_grpc
 from dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
+from peer_tracker import PeerTracker
 
 DEMO_USER = "demo"
+HEARTBEAT_INTERVAL_SECONDS = 3.0    # cada cuánto envían heartbeat los peers; muertos tras 3 perdidos (9 s)
+PING_TIMEOUT_SECONDS = 2.0          # cuánto espera RegisterPeer la respuesta del peer
 
 def clean_path(path):
     """Normaliza la ruta y asegura que comience con '/'"""
     return posixpath.normpath("/" + path.lstrip("/"))
 
 class Superpeer(rpc.SuperpeerServicer):
-    def __init__(self, node_id, registry):
+    def __init__(self, node_id, registry, peer_tracker):
         self.node_id = node_id
-        self.registry = registry   # cualquier implementación de registry.Registry
-        self.tokens = {}           # token -> user (placeholder authentication)
+        self.registry = registry           # cualquier implementación de registry.Registry
+        self.peer_tracker = peer_tracker   # tabla de peers: quién está, dónde, si sigue vivo
+        self.tokens = {}                   # token -> user (placeholder authentication)
 
     # ---------- RPC ----------
     # Patrón de todos los handlers:
@@ -81,6 +85,71 @@ class Superpeer(rpc.SuperpeerServicer):
             self.registry.rename(DEMO_USER, source_path, destination_path, now=time.time())
         return pb.Empty()
 
+    # ---------- RPC: membresía de peers ----------
+    # No son operaciones de archivos: no usan el registro ni FileSystemError.
+    # Los errores se envían directamente con context.abort, que termina el RPC (lanza una excepción).
+
+    def RegisterPeer(self, request, context):
+        """
+        RPC: un peer se presenta al arrancar, o de nuevo si un heartbeat recibió known=False. Lo llama peer.py.
+        Antes de anotarlo comprueba que su dirección responde: con una dirección equivocada,
+        los clientes no podrían leer ni escribir sus bloques.
+        """
+        peer_id = request.peer_id
+        address = request.address
+        capacity_bytes = request.capacity_bytes
+
+        if peer_id == "" or address == "":
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "peer_id and address are required")
+        if capacity_bytes <= 0:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                          f"peer {peer_id}: capacity_bytes must be positive")
+        if not peer_answers_ping(address):
+            context.abort(grpc.StatusCode.UNAVAILABLE,
+                          f"peer {peer_id}: no answer to Ping at {address}")
+
+        self.peer_tracker.register(peer_id, address, capacity_bytes)
+        print(f"peer registered: {peer_id} at {address}, capacity {capacity_bytes} bytes")
+        heartbeat_interval_seconds = self.peer_tracker.heartbeat_interval_seconds
+        return pb.RegisterPeerReply(heartbeat_interval_seconds=heartbeat_interval_seconds)
+
+    def Heartbeat(self, request, context):
+        """
+        RPC: un peer avisa que sigue vivo y cuánto espacio libre tiene. Lo llama peer.py cada pocos segundos.
+        known=False si el peer no está en la tabla (p. ej. el superpeer se reinició): debe registrarse de nuevo.
+        """
+        peer_is_known = self.peer_tracker.heartbeat(request.peer_id, request.free_bytes)
+        return pb.HeartbeatReply(known=peer_is_known)
+
+    def ListPeers(self, request, context):
+        """RPC: estado de todos los peers conocidos, vivos y muertos. Para pruebas y la demo."""
+        peer_statuses = []
+        for peer in self.peer_tracker.all_peers():
+            peer_status = pb.PeerStatus(
+                peer_id=peer.peer_id,
+                address=peer.address,
+                capacity_bytes=peer.capacity_bytes,
+                free_bytes=peer.free_bytes,
+                seconds_since_heartbeat=peer.seconds_since_heartbeat,
+                alive=peer.alive,
+            )
+            peer_statuses.append(peer_status)
+        return pb.PeerList(peers=peer_statuses)
+
+
+def peer_answers_ping(address):
+    """
+    True si en address hay un servidor Peer que responde Ping antes de PING_TIMEOUT_SECONDS.
+    Abre una conexión solo para esta comprobación; el 'with' la cierra al salir.
+    """
+    with grpc.insecure_channel(address) as channel:
+        peer_stub = rpc.PeerStub(channel)
+        try:
+            peer_stub.Ping(pb.Empty(), timeout=PING_TIMEOUT_SECONDS)
+            return True
+        except grpc.RpcError:
+            return False
+
 
 def seed_demo_entries(registry):
     """
@@ -99,7 +168,8 @@ def serve(node_id, port, demo):
     registry = DictRegistry()      # para cambiar de registro, se cambia esta línea (y el import)
     if demo:
         seed_demo_entries(registry)
-    servicer = Superpeer(node_id, registry)
+    peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
+    servicer = Superpeer(node_id, registry, peer_tracker)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     rpc.add_SuperpeerServicer_to_server(servicer, server)
     server.add_insecure_port(f"[::]:{port}")

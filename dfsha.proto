@@ -2,8 +2,9 @@ syntax = "proto3";
 
 package dfsha;
 
-// Cliente <-> Superpeer. Cada RPC corresponde a una operación del mount (comentario a la derecha).
+// ======================= Superpeer =======================
 service Superpeer {
+  // ----- Cliente -> Superpeer: espacio de nombres (comentario: operación del mount que lo usa) -----
   rpc Stat(PathRequest) returns (Attr);              // getattr: ls, cd, stat
   rpc ListDir(PathRequest) returns (DirListing);     // readdir: ls, find
   rpc MakeDir(PathRequest) returns (Empty);          // mkdir
@@ -11,9 +12,26 @@ service Superpeer {
   rpc Delete(PathRequest) returns (Empty);           // unlink: rm
   rpc Rename(RenameRequest) returns (Empty);         // rename: mv
   rpc CreateFile(PathRequest) returns (Empty);       // create: touch, primer paso de cp
+
+  // ----- Peer -> Superpeer: membresía -----
+  rpc RegisterPeer(PeerInfo) returns (RegisterPeerReply);    // al arrancar el peer
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);  // cada pocos segundos: "sigo vivo"
+
+  // ----- Inspección (pruebas, demo) -----
+  rpc ListPeers(Empty) returns (PeerList);                   // estado de todos los peers conocidos
 }
 
+// ======================= Peer =======================
+// Por ahora solo Ping. En los pasos siguientes: WriteBlock, ReadBlock, DeleteBlock.
+service Peer {
+  rpc Ping(Empty) returns (Empty);    // el superpeer comprueba que la dirección anunciada responde
+}
+
+// ======================= Mensajes comunes =======================
+
 message Empty {}      // respuesta sin datos: el éxito es simplemente no recibir un error
+
+// ======================= Espacio de nombres =======================
 
 message PathRequest {
   string path = 1;
@@ -32,4 +50,38 @@ message Attr {
 
 message DirListing {
   repeated string names = 1;     // "repeated" = a list
+}
+
+// ======================= Peers =======================
+
+message PeerInfo {
+  string peer_id = 1;            // nombre único del peer, p. ej. "peer1"
+  string address = 2;            // dónde lo encuentran el superpeer y los clientes, p. ej. "peer1:7100"
+  int64  capacity_bytes = 3;     // espacio total que ofrece para bloques
+}
+
+message RegisterPeerReply {
+  double heartbeat_interval_seconds = 1;   // cada cuánto debe enviar Heartbeat (lo decide el superpeer)
+}
+
+message HeartbeatRequest {
+  string peer_id = 1;
+  int64  free_bytes = 2;         // espacio libre en este momento
+}
+
+message HeartbeatReply {
+  bool known = 1;                // false: el superpeer no conoce este peer (p. ej. se reinició) -> registrarse de nuevo
+}
+
+message PeerStatus {             // lo que ListPeers informa de cada peer
+  string peer_id = 1;
+  string address = 2;
+  int64  capacity_bytes = 3;
+  int64  free_bytes = 4;
+  double seconds_since_heartbeat = 5;
+  bool   alive = 6;              // false si lleva demasiado tiempo sin heartbeat
+}
+
+message PeerList {
+  repeated PeerStatus peers = 1;
 }

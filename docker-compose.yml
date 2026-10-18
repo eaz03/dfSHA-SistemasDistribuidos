@@ -4,6 +4,12 @@ services:
     command: python superpeer.py --id sp1 --port 7000 --demo
     volumes: [".:/app"]
 
+  peer1:
+    build: .
+    command: python peer.py --id peer1 --host peer1 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data
+    volumes: [".:/app", "peer1-data:/data"]
+    depends_on: [sp1]
+
   client:
     build: .
     command: python mount.py sp1:7000 /mnt/dfsha
@@ -14,3 +20,6 @@ services:
     security_opt: ["apparmor:unconfined"]
     depends_on: [sp1]
     restart: on-failure
+
+volumes:
+  peer1-data:     # carpeta de bloques de peer1: sobrevive a docker compose down, se borra con down -v
