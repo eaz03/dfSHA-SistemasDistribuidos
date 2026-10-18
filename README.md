@@ -44,13 +44,18 @@ docker compose build
 #    No está en el repositorio: se genera a partir de dfsha.proto.
 docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha.proto
 
-# 3. Arrancar el superpeer y el cliente
+# 3. Crear un usuario (pide la contraseña sin mostrarla) y darle sus credenciales al montaje.
+#    --demo crea archivos de ejemplo para el usuario "demo".
+docker compose run --rm sp1 python manage_users.py add demo
+cp .env.example .env                   # y poner en .env la contraseña elegida (.env no va a git)
+
+# 4. Arrancar el superpeer, el peer y el cliente
 docker compose up -d
 
-# 4. Comprobar que arrancaron
+# 5. Comprobar que arrancaron
 docker compose ps                      # sp1 y client en estado "Up"
 docker compose logs sp1                # superpeer sp1 listening on :7000 (demo data)
-docker compose logs client             # connected to: sp1:7000
+docker compose logs client             # connected to: sp1:7000  (o "login failed": revisar .env)
 ```
 
 ## Uso
@@ -72,6 +77,22 @@ rm -r proyectos
 ```
 
 Para detener todo: `docker compose down`. El registro vive en memoria, así que se pierde al detener el superpeer.
+
+### Usuarios
+
+Cada usuario tiene su propio espacio de nombres: solo ve sus archivos.
+
+```bash
+docker compose run --rm sp1 python manage_users.py add sofi      # crear
+docker compose run --rm sp1 python manage_users.py list          # listar
+docker compose run --rm sp1 python manage_users.py remove sofi   # borrar
+
+# Montar como otro usuario sin editar .env:
+DFSHA_USER=sofi DFSHA_PASSWORD=... docker compose up -d client
+```
+
+Los usuarios (`/data/users.json`, solo hashes de las contraseñas) y la clave que firma los tokens
+(`/keys/token.key`) viven en volúmenes de `sp1`; `docker compose down -v` los borra.
 
 ## Desarrollo
 
@@ -100,5 +121,5 @@ Opciones útiles:
 ## Limitaciones actuales
 
 - Todavía no se guarda contenido: `cat`, `cp` y escribir en un archivo fallan. Los archivos existen solo como entradas del registro, con tamaño 0.
-- Un solo superpeer y un usuario fijo de prueba (`demo`): sin autenticación ni cifrado todavía.
+- Un solo superpeer. Hay login con usuario/contraseña y tokens, pero las comunicaciones todavía no van cifradas (TLS pendiente).
 - El registro está en memoria: se reinicia junto con el superpeer.

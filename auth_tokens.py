@@ -92,7 +92,7 @@ class TokenIssuer:
             máquinas. Las pruebas pasan un reloj falso para fabricar tokens ya vencidos.
         """
         self._signing_key = signing_key
-        self._ttl_seconds = ttl_seconds
+        self.ttl_seconds = ttl_seconds      # público: el Login le dice al cliente cuánto dura su token
         self._clock = clock
 
     def issue(self, username):
@@ -102,7 +102,7 @@ class TokenIssuer:
             "sub": username,                    # "subject": a quién identifica
             "typ": SESSION_TOKEN_TYPE,
             "iat": issued_at,                   # "issued at": cuándo se emitió
-            "exp": issued_at + self._ttl_seconds,   # "expiration": desde cuándo deja de servir
+            "exp": issued_at + self.ttl_seconds,   # "expiration": desde cuándo deja de servir
         }
         return jwt.encode(claims, self._signing_key, algorithm=SIGNING_ALGORITHM)
 

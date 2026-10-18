@@ -140,7 +140,16 @@ def main():
     if len(sys.argv) != 3:
         sys.exit("usage: python mount.py <superpeer host:port> <mountpoint>")
 
-    client = DFSClient([sys.argv[1]])
+    # Credenciales por variables de entorno: en Docker Compose vienen del archivo .env (fuera de git)
+    username = os.environ.get("DFSHA_USER")
+    password = os.environ.get("DFSHA_PASSWORD")
+    if not username or not password:
+        sys.exit("set DFSHA_USER and DFSHA_PASSWORD (see .env.example)")
+
+    try:
+        client = DFSClient([sys.argv[1]], username, password)
+    except grpc.RpcError as rpc_error:
+        sys.exit(f"login failed: {rpc_error.details()}")
     print(f"connected to: {client.addr}")
     FUSE(DFShaFS(client), sys.argv[2], foreground=True, nothreads=True,
         fsname="dfsha", debug=os.environ.get("DFSHA_DEBUG") == "1")

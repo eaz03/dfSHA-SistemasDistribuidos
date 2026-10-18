@@ -6,13 +6,15 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
+from auth_client import BearerTokenInterceptor, LoginSession
 
 class DFSClient:
     """Se comunica con los superpeers por gRPC"""
 
-    def __init__(self, superpeers, token=None, timeout=5):
+    def __init__(self, superpeers, username, password, timeout=5):
         self.superpeers = list(superpeers)
-        self.token = token
+        self.username = username
+        self.password = password
         self.timeout = timeout
         self.addr = None
         self.channel = None
@@ -20,17 +22,25 @@ class DFSClient:
         self._connect()
 
     def _connect(self):
-        """Itera a través de la lista de superpeers y se conecta al primero que esté disponible"""
+        """
+        Itera a través de la lista de superpeers, se conecta al primero que esté disponible y hace Login.
+        Si las credenciales no sirven lanza grpc.RpcError (UNAUTHENTICATED): no tiene sentido probar
+        otro superpeer, porque todos conocen los mismos usuarios.
+        """
         for addr in self.superpeers:
-            # AÑADIR TLS, y Autenticación con token
+            # AÑADIR TLS
             channel = grpc.insecure_channel(addr)
             try:
                 grpc.channel_ready_future(channel).result(timeout=self.timeout)
             except grpc.FutureTimeoutError:
                 channel.close()
                 continue
+            login_session = LoginSession(channel, self.username, self.password, self.timeout)
+            login_session.token()                     # Login ya: unas credenciales malas fallan al conectar
             self.addr, self.channel = addr, channel
-            self.stub = rpc.SuperpeerStub(channel)
+            # Todo lo que pase por este canal lleva el token; los métodos de abajo no cambian
+            authenticated_channel = grpc.intercept_channel(channel, BearerTokenInterceptor(login_session))
+            self.stub = rpc.SuperpeerStub(authenticated_channel)
             return
         raise ConnectionError(f"no superpeer reachable: {self.superpeers}")
 

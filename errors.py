@@ -51,6 +51,7 @@ ERRNO_FOR_GRPC_CODE = {
     grpc.StatusCode.NOT_FOUND: errno.ENOENT,
     grpc.StatusCode.ALREADY_EXISTS: errno.EEXIST,
     grpc.StatusCode.PERMISSION_DENIED: errno.EACCES,
+    grpc.StatusCode.UNAUTHENTICATED: errno.EACCES,          # sin token, o vencido o inválido -> "Permission denied"
     grpc.StatusCode.FAILED_PRECONDITION: errno.ENOTEMPTY,
 }
 

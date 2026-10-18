@@ -5,3 +5,6 @@ dfsha_pb2_grpc.py
 # Claves de firma de tokens: nunca al repositorio
 *.key
 *.key.pub
+
+# Credenciales locales (ver .env.example)
+.env
