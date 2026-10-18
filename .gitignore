@@ -1,3 +1,7 @@
 __pycache__/
 dfsha_pb2.py
 dfsha_pb2_grpc.py
+
+# Claves de firma de tokens: nunca al repositorio
+*.key
+*.key.pub
