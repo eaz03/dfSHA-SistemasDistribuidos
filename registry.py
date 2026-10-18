@@ -155,3 +155,12 @@ class Registry(ABC):
         qué bloques lo forman y en qué peers está cada uno.
         Errores: ENOENT si path no existe; EISDIR si es un directorio.
         """
+
+    @abstractmethod
+    def expire_pending_blocks(self):
+        """
+        Descarta los planes de allocate_blocks que llevan demasiado tiempo sin commit (el cliente
+        se cayó o canceló) y devuelve sus BlockInfo: el cliente pudo haber subido algunos, así que
+        borrarlos de los peers le toca a quien llama. Un commit posterior de esos bloques da EINVAL.
+        El registro no limpia por su cuenta: quien lo usa (el superpeer) decide cada cuánto llamarlo.
+        """
