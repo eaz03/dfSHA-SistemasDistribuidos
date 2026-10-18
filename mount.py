@@ -3,7 +3,6 @@
  montando un filesystem FUSE que se comunica con los superpeers por gRPC meadiante DFSClient.
 """
 
-import errno
 import os
 import stat
 import sys
@@ -13,25 +12,8 @@ import grpc
 from fuse import FUSE, Operations, FuseOSError
 
 from client import DFSClient
+from errors import errno_from_rpc_error
 
-# Código de estado gRPC -> errno que entiende el kernel; cualquier otro -> EIO
-ERRNO = {
-    grpc.StatusCode.NOT_FOUND: errno.ENOENT,
-    grpc.StatusCode.ALREADY_EXISTS: errno.EEXIST,
-    grpc.StatusCode.PERMISSION_DENIED: errno.EACCES,
-}
-
-
-def fuse_error(rpc_error):
-    """
-    Convierte un error gRPC en el errno que entiende el kernel.
-    Si el superpeer envió el errno exacto en la metadata, se usa ese;
-    si no (p. ej. el superpeer está caído), se deduce del código gRPC.
-    """
-    metadata = dict(rpc_error.trailing_metadata() or ())
-    if "errno" in metadata:
-        return FuseOSError(int(metadata["errno"]))
-    return FuseOSError(ERRNO.get(rpc_error.code(), errno.EIO))
 
 class DFShaFS(Operations):
     """Genera transparencia de acceso convirtiendo requests al kernel en llamadas al cliente DFSClient"""
@@ -64,7 +46,7 @@ class DFShaFS(Operations):
         try:
             attributes = self.client.stat(path)
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)            # p. ej. NOT_FOUND -> "No such file or directory"
+            raise FuseOSError(errno_from_rpc_error(rpc_error))   # p. ej. errno 2 -> "No such file or directory"
 
         # 2. Decidir tipo de archivo y permisos
         if attributes.is_dir:
@@ -96,7 +78,7 @@ class DFShaFS(Operations):
         try:
             child_names = self.client.ls(path)     # RPC ListDir, p. ej. ["notes.txt", "report.pdf"]
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)
+            raise FuseOSError(errno_from_rpc_error(rpc_error))
 
         # Todo directorio POSIX lista "." (él mismo) y ".." (su padre)
         return [".", ".."] + child_names
@@ -111,7 +93,7 @@ class DFShaFS(Operations):
         try:
             self.client.mkdir(path)
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)
+            raise FuseOSError(errno_from_rpc_error(rpc_error))
         return 0                                   # 0 = éxito
 
     def rmdir(self, path):
@@ -119,7 +101,7 @@ class DFShaFS(Operations):
         try:
             self.client.rmdir(path)
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)            # p. ej. "Directory not empty"
+            raise FuseOSError(errno_from_rpc_error(rpc_error))   # p. ej. "Directory not empty"
         return 0
 
     def unlink(self, path):
@@ -127,7 +109,7 @@ class DFShaFS(Operations):
         try:
             self.client.rm(path)
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)            # p. ej. "Is a directory"
+            raise FuseOSError(errno_from_rpc_error(rpc_error))   # p. ej. "Is a directory"
         return 0
 
     def rename(self, old, new):
@@ -138,7 +120,7 @@ class DFShaFS(Operations):
         try:
             self.client.mv(old, new)
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)
+            raise FuseOSError(errno_from_rpc_error(rpc_error))
         return 0
 
     def create(self, path, mode, fi=None):
@@ -150,7 +132,7 @@ class DFShaFS(Operations):
         try:
             self.client.create(path)
         except grpc.RpcError as rpc_error:
-            raise fuse_error(rpc_error)
+            raise FuseOSError(errno_from_rpc_error(rpc_error))
         return self._new_file_handle()
 
 
