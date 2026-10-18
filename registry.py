@@ -33,6 +33,18 @@ class EntryInfo:
     mtime: float     # última modificación (segundos desde 1970)
 
 
+@dataclass(frozen=True)
+class BlockInfo:
+    """
+    Un bloque de un archivo: un pedazo de hasta block_size bytes, guardado en varios peers.
+    También es una copia de solo lectura, como EntryInfo.
+    """
+    block_id: str    # único (uuid4): cada versión de un archivo usa bloques nuevos, nunca reutiliza IDs
+    size: int        # bytes de este bloque; solo el último del archivo puede ser más chico
+    peers: tuple     # peers con una réplica, p. ej. ("peer1:7001", "peer2:7002").
+                     # tuple y no list: frozen impide reasignar el campo, pero una lista se podría modificar
+
+
 class Registry(ABC):
     """
     Interfaz del registro de metadatos. Las implementaciones heredan de esta clase
@@ -86,6 +98,8 @@ class Registry(ABC):
     def delete_file(self, user, path, now):
         """
         Borra el archivo path.
+        Devuelve los BlockInfo que quedan obsoletos (los del archivo y los de sus planes
+        pendientes): borrarlos de los peers le toca a quien llama.
         Errores: ENOENT si no existe; EISDIR si es un directorio.
         """
 
@@ -95,9 +109,49 @@ class Registry(ABC):
         Mueve o renombra source_path a destination_path; si es un directorio, con todo su contenido.
         Si destination_path existe, lo reemplaza, siempre que sea del mismo tipo
         y, si es directorio, esté vacío. Si ambos paths son iguales, no hace nada.
+        Devuelve los BlockInfo que quedan obsoletos: los del archivo reemplazado en el destino
+        y los de los planes pendientes de los paths que dejan de existir (lista vacía si no hay).
         Errores: EBUSY si alguno es la raíz; ENOENT si source_path no existe o el padre
                  del destino no existe; ENOTDIR si el padre del destino es un archivo, o si se
                  quiere reemplazar un archivo con un directorio; EISDIR si se quiere reemplazar
                  un directorio con un archivo; ENOTEMPTY si el directorio destino tiene contenido;
                  EINVAL si se quiere mover un directorio dentro de sí mismo.
+        """
+
+    # ---------- Bloques ----------
+    # Escribir un archivo es en dos fases: allocate_blocks entrega un plan (bloques nuevos y sus
+    # peers), el cliente sube los bloques, y commit_file hace visible la versión nueva de una vez.
+    # Si el cliente se cae a mitad de la subida, el archivo conserva su versión anterior completa.
+
+    @abstractmethod
+    def allocate_blocks(self, user, path, file_size):
+        """
+        Planifica dónde guardar una versión nueva de path, de file_size bytes: la parte en bloques
+        y le asigna a cada uno replication_factor peers distintos.
+        Devuelve una lista de BlockInfo, en orden (vacía si file_size es 0).
+        No modifica el archivo, por eso no recibe 'now': no hay nada que repetir desde un log.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si file_size < 0;
+                 ENOSPC si hay menos peers que el factor de replicación.
+        """
+
+    @abstractmethod
+    def commit_file(self, user, path, size, blocks, now):
+        """
+        Hace visible la versión nueva de path, de size bytes, formada por blocks (en orden),
+        cuando el cliente ya subió todos esos bloques a sus peers.
+        Recibe los BlockInfo completos y 'now' para que se pueda repetir igual desde un log.
+        Devuelve los BlockInfo de la versión anterior, ya obsoletos: el registro no habla con
+        los peers, así que borrarlos le toca a quien llama.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si size < 0,
+                 si algún bloque no es exactamente uno asignado por allocate_blocks a ese
+                 usuario y path, si un bloque se repite, si algún bloque que no es el último
+                 no mide block_size, o si los tamaños de los bloques no suman size.
+        """
+
+    @abstractmethod
+    def get_block_locations(self, user, path):
+        """
+        Devuelve los BlockInfo de la versión actual de path, en orden (vacía si mide 0 bytes):
+        qué bloques lo forman y en qué peers está cada uno.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio.
         """
