@@ -18,14 +18,13 @@ Este módulo envuelve PyJWT: el resto del código solo ve TokenIssuer, TokenVeri
 InvalidTokenError, así que cambiar de librería no lo afectaría.
 """
 
-import contextlib
-import os
 import time
-import uuid
 
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from key_files import create_file_exclusively
 
 SIGNING_ALGORITHM = "EdDSA"
 SESSION_TOKEN_TYPE = "session"          # token de login; los permisos de bloque tendrán otro tipo
@@ -57,7 +56,7 @@ def load_or_create_signing_key(private_key_path):
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    created = _create_file_exclusively(private_key_path, private_pem, mode=0o600)
+    created = create_file_exclusively(private_key_path, private_pem, mode=0o600)
     if not created:
         # Otro proceso la creó justo al mismo tiempo: se usa la suya, para que todos firmen igual
         return _load_private_key(private_key_path)
@@ -66,7 +65,7 @@ def load_or_create_signing_key(private_key_path):
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    _create_file_exclusively(private_key_path + ".pub", public_pem, mode=0o644)   # la pública sí se puede compartir
+    create_file_exclusively(private_key_path + ".pub", public_pem, mode=0o644)   # la pública sí se puede compartir
     return private_key
 
 
@@ -79,31 +78,6 @@ def load_verification_key(public_key_path):
 def _load_private_key(private_key_path):
     with open(private_key_path, "rb") as private_key_file:
         return serialization.load_pem_private_key(private_key_file.read(), password=None)
-
-
-def _create_file_exclusively(path, content, mode):
-    """
-    Crea path con content solo si no existe todavía. Devuelve True si lo creó, False si ya existía.
-    Se escribe completo en un temporal y luego se "engancha" con os.link, que falla si path ya
-    existe: así nunca queda un archivo a medias y nunca se pisa una clave que otro proceso ya creó
-    (os.replace sí la pisaría).
-    """
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    temporary_path = f"{path}.tmp-{uuid.uuid4().hex}"
-    try:
-        with open(temporary_path, "wb") as temporary_file:
-            temporary_file.write(content)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        os.chmod(temporary_path, mode)
-        try:
-            os.link(temporary_path, path)
-            return True
-        except FileExistsError:
-            return False
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(temporary_path)
 
 
 # ---------- Emitir y verificar ----------
