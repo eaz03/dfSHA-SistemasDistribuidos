@@ -40,10 +40,13 @@ GRPC_CODE_FOR_ERRNO = {
     errno.EEXIST: grpc.StatusCode.ALREADY_EXISTS,            # File exists
     errno.EACCES: grpc.StatusCode.PERMISSION_DENIED,         # Permission denied
     errno.ENOTEMPTY: grpc.StatusCode.FAILED_PRECONDITION,    # Directory not empty
+    errno.ENOSPC: grpc.StatusCode.RESOURCE_EXHAUSTED,        # No space left on device (faltan peers)
 }
 
 # código gRPC -> errno, solo para cuando NO llegó metadata (p. ej. el superpeer está caído).
 # Cualquier código que no esté aquí se convierte en EIO ("Input/output error").
+# RESOURCE_EXHAUSTED no está a propósito: gRPC también lo usa por su cuenta (p. ej. un mensaje
+# que pasa del límite de tamaño), y sin metadata no sabemos si de verdad faltó espacio.
 ERRNO_FOR_GRPC_CODE = {
     grpc.StatusCode.NOT_FOUND: errno.ENOENT,
     grpc.StatusCode.ALREADY_EXISTS: errno.EEXIST,
