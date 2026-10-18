@@ -1,15 +1,16 @@
 services:
   sp1:
     build: .
-    command: python superpeer.py --id sp1 --port 7000
-    volumes: [".:/app"]              # live code: edit in WSL, restart, no rebuild
+    command: python superpeer.py --id sp1 --port 7000 --demo
+    volumes: [".:/app"]
 
   client:
     build: .
     command: python mount.py sp1:7000 /mnt/dfsha
     volumes: [".:/app"]
-    devices: ["/dev/fuse"]           # give the container the FUSE device
-    cap_add: ["SYS_ADMIN"]           # permission to mount
-    security_opt: ["apparmor:unconfined"]   # AppArmor would block the mount where it's active
+    environment: ["DFSHA_DEBUG=1"]
+    devices: ["/dev/fuse"]
+    cap_add: ["SYS_ADMIN"]
+    security_opt: ["apparmor:unconfined"]
     depends_on: [sp1]
-    restart: on-failure              # retry if sp1 wasn't ready yet
+    restart: on-failure

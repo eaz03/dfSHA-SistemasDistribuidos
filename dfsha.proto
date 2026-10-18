@@ -2,13 +2,26 @@ syntax = "proto3";
 
 package dfsha;
 
+// Cliente <-> Superpeer. Cada RPC corresponde a una operación del mount (comentario a la derecha).
 service Superpeer {
-  rpc Stat(PathRequest) returns (Attr);
-  rpc ListDir(PathRequest) returns (DirListing);
+  rpc Stat(PathRequest) returns (Attr);              // getattr: ls, cd, stat
+  rpc ListDir(PathRequest) returns (DirListing);     // readdir: ls, find
+  rpc MakeDir(PathRequest) returns (Empty);          // mkdir
+  rpc RemoveDir(PathRequest) returns (Empty);        // rmdir
+  rpc Delete(PathRequest) returns (Empty);           // unlink: rm
+  rpc Rename(RenameRequest) returns (Empty);         // rename: mv
+  rpc CreateFile(PathRequest) returns (Empty);       // create: touch, primer paso de cp
 }
+
+message Empty {}      // respuesta sin datos: el éxito es simplemente no recibir un error
 
 message PathRequest {
   string path = 1;
+}
+
+message RenameRequest {
+  string source_path = 1;
+  string destination_path = 2;
 }
 
 message Attr {
