@@ -3,7 +3,10 @@ Implementación del registro con un diccionario plano por usuario (la estructura
 
     {"demo": {"/":           {"is_dir": True,  "size": 0, "mtime": ...},
               "/docs":       {"is_dir": True,  "size": 0, "mtime": ...},
-              "/docs/a.txt": {"is_dir": False, "size": 0, "mtime": ...}}}
+              "/docs/a.txt": {"is_dir": False, "size": 0, "mtime": ..., "blocks": [BlockInfo, ...]}}}
+
+Los archivos además guardan "blocks": sus bloques en orden (el bloque i tiene los bytes
+desde i * block_size), así que el byte N de un archivo está en blocks[N // block_size].
 
 Ventaja: stat es una sola búsqueda en el diccionario.
 Costo: list_directory, remove_directory y rename recorren TODAS las entradas del usuario.
@@ -15,17 +18,37 @@ import errno
 import posixpath
 import threading
 import time
+import uuid
 
 from errors import FileSystemError
-from registry import EntryInfo, Registry
+from registry import BlockInfo, EntryInfo, Registry
+
+DEFAULT_BLOCK_SIZE = 1024 * 1024     # 1 MiB: en desarrollo, para que hasta un archivo chico se parta en bloques
+DEFAULT_REPLICATION_FACTOR = 2       # cada bloque en 2 peers distintos: aguanta la caída de uno
+
+
+def fixed_test_peers():
+    """
+    Peers inventados, mientras no exista la tabla real de peers vivos (Paso 1).
+    Cuando exista, superpeer.py le pasa a DictRegistry una función que consulte esa tabla.
+    """
+    return ["peer1:7001", "peer2:7002"]
 
 
 class DictRegistry(Registry):
     """Registro en memoria: {usuario: {path absoluto: entrada}}."""
 
-    def __init__(self):
+    def __init__(self, live_peers=fixed_test_peers, block_size=DEFAULT_BLOCK_SIZE,
+                 replication_factor=DEFAULT_REPLICATION_FACTOR):
         self._lock = threading.Lock()    # gRPC atiende varias llamadas a la vez, en hilos distintos
-        self._namespaces = {}            # usuario -> {path absoluto: {"is_dir", "size", "mtime"}}
+        self._namespaces = {}            # usuario -> {path absoluto: {"is_dir", "size", "mtime", "blocks"}}
+
+        # Una función y no una lista: los peers aparecen y se caen, así que se pregunta en cada asignación
+        self._live_peers = live_peers                    # () -> lista de direcciones "host:puerto"
+        self._block_size = block_size
+        self._replication_factor = replication_factor
+        self._next_peer = 0              # cursor del round robin: dónde empieza el próximo bloque
+        self._pending_blocks = {}        # block_id -> (usuario, path, BlockInfo): asignados, sin commit todavía
 
     # ---------- Helpers internos (quien llama debe tener self._lock) ----------
 
@@ -71,6 +94,33 @@ class DictRegistry(Registry):
         """
         parent_path = posixpath.dirname(path)
         user_namespace[parent_path]["mtime"] = now
+
+    def _get_file_entry(self, user_namespace, path):
+        """
+        Devuelve la entrada del archivo path.
+        Lanza FileSystemError(ENOENT) si no existe, o FileSystemError(EISDIR) si es un directorio.
+        """
+        file_entry = user_namespace.get(path)
+        if file_entry is None:
+            raise FileSystemError(errno.ENOENT, path)
+        if file_entry["is_dir"]:
+            raise FileSystemError(errno.EISDIR, path)
+        return file_entry
+
+    def _choose_peers(self, peer_addresses):
+        """
+        Elige replication_factor peers distintos para un bloque, por turnos (round robin),
+        como quien reparte cartas: toma los siguientes peers desde el cursor y deja el cursor
+        donde terminó, para que el próximo bloque empiece en otros peers.
+        Con peers [A, B, C, D] y factor 2: bloque 0 -> (A, B), bloque 1 -> (C, D), bloque 2 -> (A, B)...
+        Quien llama garantiza que hay al menos replication_factor peers, así que nunca se repite uno.
+        """
+        chosen_peers = []
+        for offset in range(self._replication_factor):
+            position = (self._next_peer + offset) % len(peer_addresses)   # % da la vuelta al final de la lista
+            chosen_peers.append(peer_addresses[position])
+        self._next_peer = (self._next_peer + self._replication_factor) % len(peer_addresses)
+        return tuple(chosen_peers)
 
     # ---------- Consultas ----------
     # Cada método público toma el lock: así es atómico aunque gRPC lo llame desde varios hilos.
@@ -137,7 +187,7 @@ class DictRegistry(Registry):
             if path in user_namespace:
                 raise FileSystemError(errno.EEXIST, path)
 
-            user_namespace[path] = {"is_dir": False, "size": 0, "mtime": now}
+            user_namespace[path] = {"is_dir": False, "size": 0, "mtime": now, "blocks": []}
             self._mark_parent_modified(user_namespace, path, now)
 
     def delete_file(self, user, path, now):
@@ -206,3 +256,33 @@ class DictRegistry(Registry):
             # 5. Ambos directorios (el de origen y el de destino) cambiaron de contenido
             self._mark_parent_modified(user_namespace, source_path, now)
             self._mark_parent_modified(user_namespace, destination_path, now)
+
+    # ---------- Bloques ----------
+
+    def allocate_blocks(self, user, path, file_size):
+        with self._lock:
+            user_namespace = self._namespace(user)
+
+            # 1. Validaciones: es un archivo existente, el tamaño tiene sentido y hay peers suficientes
+            self._get_file_entry(user_namespace, path)
+            if file_size < 0:
+                raise FileSystemError(errno.EINVAL, path)
+            peer_addresses = list(self._live_peers())    # una sola foto de los peers para todo el archivo
+            if file_size > 0 and len(peer_addresses) < self._replication_factor:
+                raise FileSystemError(errno.ENOSPC, path)    # no se escribe con menos réplicas de las acordadas
+
+            # 2. Partir file_size en bloques de block_size; el último se queda con lo que sobra
+            #    2.5 MiB con bloques de 1 MiB -> [1 MiB, 1 MiB, 0.5 MiB]
+            blocks = []
+            remaining_bytes = file_size
+            while remaining_bytes > 0:
+                this_block_size = min(self._block_size, remaining_bytes)
+                block = BlockInfo(block_id=uuid.uuid4().hex, size=this_block_size,
+                                  peers=self._choose_peers(peer_addresses))
+                blocks.append(block)
+                remaining_bytes -= this_block_size
+
+            # 3. Recordar a quién se le asignó cada bloque, para validarlo en commit_file
+            for block in blocks:
+                self._pending_blocks[block.block_id] = (user, path, block)
+            return blocks

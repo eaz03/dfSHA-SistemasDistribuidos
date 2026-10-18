@@ -33,6 +33,18 @@ class EntryInfo:
     mtime: float     # última modificación (segundos desde 1970)
 
 
+@dataclass(frozen=True)
+class BlockInfo:
+    """
+    Un bloque de un archivo: un pedazo de hasta block_size bytes, guardado en varios peers.
+    También es una copia de solo lectura, como EntryInfo.
+    """
+    block_id: str    # único (uuid4): cada versión de un archivo usa bloques nuevos, nunca reutiliza IDs
+    size: int        # bytes de este bloque; solo el último del archivo puede ser más chico
+    peers: tuple     # peers con una réplica, p. ej. ("peer1:7001", "peer2:7002").
+                     # tuple y no list: frozen impide reasignar el campo, pero una lista se podría modificar
+
+
 class Registry(ABC):
     """
     Interfaz del registro de metadatos. Las implementaciones heredan de esta clase
@@ -100,4 +112,20 @@ class Registry(ABC):
                  quiere reemplazar un archivo con un directorio; EISDIR si se quiere reemplazar
                  un directorio con un archivo; ENOTEMPTY si el directorio destino tiene contenido;
                  EINVAL si se quiere mover un directorio dentro de sí mismo.
+        """
+
+    # ---------- Bloques ----------
+    # Escribir un archivo es en dos fases: allocate_blocks entrega un plan (bloques nuevos y sus
+    # peers), el cliente sube los bloques, y commit_file hace visible la versión nueva de una vez.
+    # Si el cliente se cae a mitad de la subida, el archivo conserva su versión anterior completa.
+
+    @abstractmethod
+    def allocate_blocks(self, user, path, file_size):
+        """
+        Planifica dónde guardar una versión nueva de path, de file_size bytes: la parte en bloques
+        y le asigna a cada uno replication_factor peers distintos.
+        Devuelve una lista de BlockInfo, en orden (vacía si file_size es 0).
+        No modifica el archivo, por eso no recibe 'now': no hay nada que repetir desde un log.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si file_size < 0;
+                 ENOSPC si hay menos peers que el factor de replicación.
         """
