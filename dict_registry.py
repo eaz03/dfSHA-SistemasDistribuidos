@@ -286,3 +286,48 @@ class DictRegistry(Registry):
             for block in blocks:
                 self._pending_blocks[block.block_id] = (user, path, block)
             return blocks
+
+    def commit_file(self, user, path, size, blocks, now):
+        with self._lock:
+            user_namespace = self._namespace(user)
+            blocks = list(blocks)        # se recorre varias veces: si llega un iterador, se agotaría
+
+            # 1. Validaciones: es un archivo existente y el tamaño tiene sentido
+            file_entry = self._get_file_entry(user_namespace, path)
+            if size < 0:
+                raise FileSystemError(errno.EINVAL, path)
+
+            # 2. Cada bloque es exactamente uno de los asignados a este usuario y path, sin repetir.
+            #    Fase 8: _pending_blocks vive en memoria y no sobrevive a un reinicio, así que el
+            #    replay desde un log no podrá pasar por esta validación (el log solo guardará
+            #    commits que ya la pasaron).
+            seen_block_ids = set()
+            for block in blocks:
+                if self._pending_blocks.get(block.block_id) != (user, path, block):
+                    raise FileSystemError(errno.EINVAL, path)
+                if block.block_id in seen_block_ids:
+                    raise FileSystemError(errno.EINVAL, path)
+                seen_block_ids.add(block.block_id)
+
+            # 3. Los tamaños encajan: todos menos el último miden block_size (para que el byte N
+            #    siga estando en blocks[N // block_size]) y entre todos suman size
+            for block in blocks[:-1]:
+                if block.size != self._block_size:
+                    raise FileSystemError(errno.EINVAL, path)
+            if sum(block.size for block in blocks) != size:
+                raise FileSystemError(errno.EINVAL, path)
+
+            # 4. Cambiar de versión de una vez: como estamos dentro del lock, nadie ve una mezcla.
+            #    El mtime del directorio no cambia: escribir un archivo no agrega ni quita hijos.
+            obsolete_blocks = file_entry["blocks"]
+            file_entry["blocks"] = blocks
+            file_entry["size"] = size
+            file_entry["mtime"] = now
+            for block in blocks:
+                del self._pending_blocks[block.block_id]     # ya no están pendientes: son del archivo
+            return obsolete_blocks
+
+    def get_block_locations(self, user, path):
+        with self._lock:
+            file_entry = self._get_file_entry(self._namespace(user), path)
+            return list(file_entry["blocks"])    # copia: quien la recibe no puede cambiar el registro sin el lock

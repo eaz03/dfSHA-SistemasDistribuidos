@@ -129,3 +129,25 @@ class Registry(ABC):
         Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si file_size < 0;
                  ENOSPC si hay menos peers que el factor de replicación.
         """
+
+    @abstractmethod
+    def commit_file(self, user, path, size, blocks, now):
+        """
+        Hace visible la versión nueva de path, de size bytes, formada por blocks (en orden),
+        cuando el cliente ya subió todos esos bloques a sus peers.
+        Recibe los BlockInfo completos y 'now' para que se pueda repetir igual desde un log.
+        Devuelve los BlockInfo de la versión anterior, ya obsoletos: el registro no habla con
+        los peers, así que borrarlos le toca a quien llama.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si size < 0,
+                 si algún bloque no es exactamente uno asignado por allocate_blocks a ese
+                 usuario y path, si un bloque se repite, si algún bloque que no es el último
+                 no mide block_size, o si los tamaños de los bloques no suman size.
+        """
+
+    @abstractmethod
+    def get_block_locations(self, user, path):
+        """
+        Devuelve los BlockInfo de la versión actual de path, en orden (vacía si mide 0 bytes):
+        qué bloques lo forman y en qué peers está cada uno.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio.
+        """
