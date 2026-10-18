@@ -98,6 +98,8 @@ class Registry(ABC):
     def delete_file(self, user, path, now):
         """
         Borra el archivo path.
+        Devuelve los BlockInfo que quedan obsoletos (los del archivo y los de sus planes
+        pendientes): borrarlos de los peers le toca a quien llama.
         Errores: ENOENT si no existe; EISDIR si es un directorio.
         """
 
@@ -107,6 +109,8 @@ class Registry(ABC):
         Mueve o renombra source_path a destination_path; si es un directorio, con todo su contenido.
         Si destination_path existe, lo reemplaza, siempre que sea del mismo tipo
         y, si es directorio, esté vacío. Si ambos paths son iguales, no hace nada.
+        Devuelve los BlockInfo que quedan obsoletos: los del archivo reemplazado en el destino
+        y los de los planes pendientes de los paths que dejan de existir (lista vacía si no hay).
         Errores: EBUSY si alguno es la raíz; ENOENT si source_path no existe o el padre
                  del destino no existe; ENOTDIR si el padre del destino es un archivo, o si se
                  quiere reemplazar un archivo con un directorio; EISDIR si se quiere reemplazar

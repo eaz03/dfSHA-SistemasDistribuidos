@@ -122,6 +122,24 @@ class DictRegistry(Registry):
         self._next_peer = (self._next_peer + self._replication_factor) % len(peer_addresses)
         return tuple(chosen_peers)
 
+    def _discard_pending_blocks(self, user, path):
+        """
+        Descarta los planes pendientes de path y, si es un directorio, de todo lo que tiene debajo.
+        Se llama cuando esos paths dejan de existir: si no, un commit tardío del plan viejo caería
+        sobre un archivo nuevo creado con el mismo nombre (problema ABA).
+        Devuelve los BlockInfo descartados: el cliente pudo haber subido algunos, así que también
+        hay que borrarlos de los peers.
+        """
+        discarded_blocks = []
+        # list(...): se borran llaves del diccionario mientras se recorre, y Python no lo permite
+        for block_id, (pending_user, pending_path, block) in list(self._pending_blocks.items()):
+            is_the_path_itself = (pending_path == path)
+            is_inside_the_path = pending_path.startswith(path + "/")
+            if pending_user == user and (is_the_path_itself or is_inside_the_path):
+                discarded_blocks.append(block)
+                del self._pending_blocks[block_id]
+        return discarded_blocks
+
     # ---------- Consultas ----------
     # Cada método público toma el lock: así es atómico aunque gRPC lo llame desde varios hilos.
     # Si se lanza un FileSystemError adentro del 'with', el lock se libera igual.
@@ -203,7 +221,8 @@ class DictRegistry(Registry):
 
             del user_namespace[path]
             self._mark_parent_modified(user_namespace, path, now)
-            # Tarea 4: aquí también habrá que liberar los bloques del archivo en los peers
+            # Nadie va a usar los bloques del archivo ni los de sus planes pendientes
+            return file_entry["blocks"] + self._discard_pending_blocks(user, path)
 
     def rename(self, user, source_path, destination_path, now):
         with self._lock:
@@ -221,7 +240,7 @@ class DictRegistry(Registry):
                 # mover un directorio dentro de sí mismo
                 raise FileSystemError(errno.EINVAL, destination_path)
             if source_path == destination_path:
-                return                                              # mismo nombre: no hay nada que hacer
+                return []                                           # mismo nombre: no hay nada que hacer
 
             # 2. Si el destino ya existe, se reemplaza, pero solo si es del mismo tipo
             #    (y, si es directorio, solo si está vacío)
@@ -256,6 +275,15 @@ class DictRegistry(Registry):
             # 5. Ambos directorios (el de origen y el de destino) cambiaron de contenido
             self._mark_parent_modified(user_namespace, source_path, now)
             self._mark_parent_modified(user_namespace, destination_path, now)
+
+            # 6. Bloques que nadie va a usar: los del archivo reemplazado (los directorios no tienen)
+            #    y los planes pendientes del destino reemplazado y del origen, cuyos paths ya no existen
+            obsolete_blocks = []
+            if destination_entry is not None and not destination_entry["is_dir"]:
+                obsolete_blocks += destination_entry["blocks"]
+            obsolete_blocks += self._discard_pending_blocks(user, destination_path)
+            obsolete_blocks += self._discard_pending_blocks(user, source_path)
+            return obsolete_blocks
 
     # ---------- Bloques ----------
 
