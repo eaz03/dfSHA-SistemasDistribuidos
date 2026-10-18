@@ -19,27 +19,39 @@ import posixpath
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 
 from errors import FileSystemError
 from registry import BlockInfo, EntryInfo, Registry
 
 DEFAULT_BLOCK_SIZE = 1024 * 1024     # 1 MiB: en desarrollo, para que hasta un archivo chico se parta en bloques
 DEFAULT_REPLICATION_FACTOR = 2       # cada bloque en 2 peers distintos: aguanta la caída de uno
+DEFAULT_PENDING_PLAN_TTL_SECONDS = 30 * 60   # mucho más de lo que tarda subir un archivo grande
 
 
 def fixed_test_peers():
     """
-    Peers inventados, mientras no exista la tabla real de peers vivos (Paso 1).
-    Cuando exista, superpeer.py le pasa a DictRegistry una función que consulte esa tabla.
+    Peers inventados, para usar DictRegistry sin superpeer (p. ej. en pruebas).
+    El superpeer le pasa en cambio una función que consulta su tabla de peers vivos (PeerTracker).
     """
     return ["peer1:7001", "peer2:7002"]
+
+
+@dataclass(frozen=True)
+class _PendingBlock:
+    """Un bloque asignado por allocate_blocks que todavía no tiene commit (interno: no sale del registro)."""
+    user: str
+    path: str
+    block: BlockInfo
+    allocated_at: float              # según self._clock: para saber cuándo se venció el plan
 
 
 class DictRegistry(Registry):
     """Registro en memoria: {usuario: {path absoluto: entrada}}."""
 
     def __init__(self, live_peers=fixed_test_peers, block_size=DEFAULT_BLOCK_SIZE,
-                 replication_factor=DEFAULT_REPLICATION_FACTOR):
+                 replication_factor=DEFAULT_REPLICATION_FACTOR,
+                 pending_plan_ttl_seconds=DEFAULT_PENDING_PLAN_TTL_SECONDS, clock=time.monotonic):
         self._lock = threading.Lock()    # gRPC atiende varias llamadas a la vez, en hilos distintos
         self._namespaces = {}            # usuario -> {path absoluto: {"is_dir", "size", "mtime", "blocks"}}
 
@@ -48,7 +60,12 @@ class DictRegistry(Registry):
         self._block_size = block_size
         self._replication_factor = replication_factor
         self._next_peer = 0              # cursor del round robin: dónde empieza el próximo bloque
-        self._pending_blocks = {}        # block_id -> (usuario, path, BlockInfo): asignados, sin commit todavía
+        self._pending_blocks = {}        # block_id -> _PendingBlock: asignados, sin commit todavía
+
+        # Los planes no van al log (son estado temporal), así que pueden usar un reloj propio.
+        # monotonic no salta si alguien cambia la hora del sistema; las pruebas pasan un reloj falso.
+        self._pending_plan_ttl_seconds = pending_plan_ttl_seconds
+        self._clock = clock
 
     # ---------- Helpers internos (quien llama debe tener self._lock) ----------
 
@@ -132,11 +149,11 @@ class DictRegistry(Registry):
         """
         discarded_blocks = []
         # list(...): se borran llaves del diccionario mientras se recorre, y Python no lo permite
-        for block_id, (pending_user, pending_path, block) in list(self._pending_blocks.items()):
-            is_the_path_itself = (pending_path == path)
-            is_inside_the_path = pending_path.startswith(path + "/")
-            if pending_user == user and (is_the_path_itself or is_inside_the_path):
-                discarded_blocks.append(block)
+        for block_id, pending in list(self._pending_blocks.items()):
+            is_the_path_itself = (pending.path == path)
+            is_inside_the_path = pending.path.startswith(path + "/")
+            if pending.user == user and (is_the_path_itself or is_inside_the_path):
+                discarded_blocks.append(pending.block)
                 del self._pending_blocks[block_id]
         return discarded_blocks
 
@@ -310,9 +327,11 @@ class DictRegistry(Registry):
                 blocks.append(block)
                 remaining_bytes -= this_block_size
 
-            # 3. Recordar a quién se le asignó cada bloque, para validarlo en commit_file
+            # 3. Recordar a quién y cuándo se le asignó cada bloque, para validarlo en commit_file
+            #    y para descartarlo si el plan se abandona (expire_pending_blocks)
+            allocated_at = self._clock()
             for block in blocks:
-                self._pending_blocks[block.block_id] = (user, path, block)
+                self._pending_blocks[block.block_id] = _PendingBlock(user, path, block, allocated_at)
             return blocks
 
     def commit_file(self, user, path, size, blocks, now):
@@ -331,7 +350,8 @@ class DictRegistry(Registry):
             #    commits que ya la pasaron).
             seen_block_ids = set()
             for block in blocks:
-                if self._pending_blocks.get(block.block_id) != (user, path, block):
+                pending = self._pending_blocks.get(block.block_id)
+                if pending is None or (pending.user, pending.path, pending.block) != (user, path, block):
                     raise FileSystemError(errno.EINVAL, path)
                 if block.block_id in seen_block_ids:
                     raise FileSystemError(errno.EINVAL, path)
@@ -359,3 +379,14 @@ class DictRegistry(Registry):
         with self._lock:
             file_entry = self._get_file_entry(self._namespace(user), path)
             return list(file_entry["blocks"])    # copia: quien la recibe no puede cambiar el registro sin el lock
+
+    def expire_pending_blocks(self):
+        with self._lock:
+            now = self._clock()
+            expired_blocks = []
+            # list(...): se borran llaves del diccionario mientras se recorre
+            for block_id, pending in list(self._pending_blocks.items()):
+                if now - pending.allocated_at > self._pending_plan_ttl_seconds:
+                    expired_blocks.append(pending.block)
+                    del self._pending_blocks[block_id]
+            return expired_blocks

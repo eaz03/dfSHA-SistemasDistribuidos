@@ -165,10 +165,16 @@ def seed_demo_entries(registry):
 
 
 def serve(node_id, port, demo):
-    registry = DictRegistry()      # para cambiar de registro, se cambia esta línea (y el import)
+    # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
+    peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
+
+    def alive_peer_addresses():
+        """Direcciones de los peers vivos, p. ej. ["peer1:7100"]. El registro la llama en cada allocate_blocks."""
+        return [peer.address for peer in peer_tracker.alive_peers()]
+
+    registry = DictRegistry(live_peers=alive_peer_addresses)   # para cambiar de registro, se cambia esta línea (y el import)
     if demo:
         seed_demo_entries(registry)
-    peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
     servicer = Superpeer(node_id, registry, peer_tracker)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     rpc.add_SuperpeerServicer_to_server(servicer, server)
