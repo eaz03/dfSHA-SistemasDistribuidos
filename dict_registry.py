@@ -31,8 +31,8 @@ DEFAULT_PENDING_PLAN_TTL_SECONDS = 30 * 60   # mucho más de lo que tarda subir 
 
 def fixed_test_peers():
     """
-    Peers inventados, mientras no exista la tabla real de peers vivos (Paso 1).
-    Cuando exista, superpeer.py le pasa a DictRegistry una función que consulte esa tabla.
+    Peers inventados, para usar DictRegistry sin superpeer (p. ej. en pruebas).
+    El superpeer le pasa en cambio una función que consulta su tabla de peers vivos (PeerTracker).
     """
     return ["peer1:7001", "peer2:7002"]
 
