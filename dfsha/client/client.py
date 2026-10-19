@@ -160,6 +160,26 @@ class DFSClient:
                 blocks_data.append(pending_read.result())   # si un bloque falló, aquí se lanza su error
             return blocks_data
 
+    def read_blocks_allowing_failures(self, block_locations):
+        """
+        Como read_blocks, pero un bloque que no se pudo leer no detiene a los demás:
+        devuelve, en orden, los bytes de cada bloque o None en los que fallaron.
+        La usa la descarga anticipada del mount, que es opcional: un bloque que falla aquí
+        se vuelve a pedir (y su error se informa) recién cuando alguien lo lee de verdad.
+        """
+        with futures.ThreadPoolExecutor(max_workers=PARALLEL_BLOCK_TRANSFERS) as executor:
+            pending_reads = []
+            for block_location in block_locations:
+                pending_read = executor.submit(self.read_block, block_location)
+                pending_reads.append(pending_read)
+            blocks_data = []
+            for pending_read in pending_reads:
+                try:
+                    blocks_data.append(pending_read.result())
+                except (FileSystemError, grpc.RpcError):
+                    blocks_data.append(None)                  # este no: ya se intentará cuando se lea
+            return blocks_data
+
     def download_to_file(self, path, local_path):
         """
         Copia el contenido completo de path a local_path y devuelve los bytes escritos.
