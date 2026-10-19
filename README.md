@@ -113,6 +113,9 @@ un `peer` puede registrarse en el superpeer y solo un `superpeer` puede dar órd
 Los certificados de los nodos duran 90 días y la CA un año. En una VM se copian solo
 `node.key`, `node.crt` y `ca.crt` de su carpeta: `ca.key` nunca sale de donde se emiten.
 
+Para desplegar en máquinas virtuales (CA, certificados por IP de la VPN, usuarios, renovación y
+qué hacer si algo se compromete), seguir [DESPLIEGUE.md](DESPLIEGUE.md).
+
 ## Desarrollo
 
 | Si se modifica... | Hay que ejecutar |
