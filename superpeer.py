@@ -13,6 +13,7 @@ from errors import translate_file_system_errors_to_grpc
 from dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
 from json_user_store import JsonUserStore
 from peer_tracker import PeerTracker
+from registry import BlockInfo
 from tls import secure_channel, server_credentials
 
 DEMO_USER = "demo"                  # dueño de las entradas de ejemplo de --demo (crear su cuenta con manage_users.py)
@@ -31,6 +32,8 @@ NODE_METHOD_ROLES = {
 }
 HEARTBEAT_INTERVAL_SECONDS = 3.0    # cada cuánto envían heartbeat los peers; muertos tras 3 perdidos (9 s)
 PING_TIMEOUT_SECONDS = 2.0          # cuánto espera RegisterPeer la respuesta del peer
+BLOCK_SIZE_BYTES = 1024 * 1024      # 1 MiB por bloque: el registro parte los archivos con este tamaño,
+                                    # y un peer recibe bloques nuevos solo si le cabe al menos uno
 
 def clean_path(path):
     """Normaliza la ruta y asegura que comience con '/'"""
@@ -167,6 +170,82 @@ class Superpeer(rpc.SuperpeerServicer):
             peer_statuses.append(peer_status)
         return pb.PeerList(peers=peer_statuses)
 
+    # ---------- RPC: bloques ----------
+    # El superpeer nunca toca los bytes: entrega IDs de bloques y dónde están (o dónde escribirlos),
+    # y el cliente habla directo con los peers.
+    # El registro guarda peer_id; aquí se traduce cada uno a su dirección con la tabla de peers.
+
+    def GetBlockLocations(self, request, context):
+        """
+        RPC: qué bloques forman un archivo, en orden, y en qué peers buscar cada uno.
+        Lo usa open en el mount, para leer. En cada bloque van primero los peers vivos.
+        """
+        path = clean_path(request.path)
+        with translate_file_system_errors_to_grpc(context):
+            blocks = self.registry.get_block_locations(current_user(), path)
+        return self._block_list_reply(blocks)
+
+    def AllocateBlocks(self, request, context):
+        """
+        RPC: el plan para subir una versión nueva de un archivo de request.size bytes:
+        bloques nuevos y en qué peers escribir cada uno. El archivo no cambia hasta CommitFile.
+        """
+        path = clean_path(request.path)
+        with translate_file_system_errors_to_grpc(context):
+            blocks = self.registry.allocate_blocks(current_user(), path, request.size)
+        return self._block_list_reply(blocks)
+
+    def CommitFile(self, request, context):
+        """
+        RPC: el cliente ya subió los bloques del plan; la versión nueva del archivo se vuelve visible.
+        En cada bloque, las réplicas son los peers donde el cliente SÍ logró escribirlo.
+        """
+        path = clean_path(request.path)
+        blocks = []
+        for block_location in request.blocks:
+            written_peer_ids = []
+            for replica in block_location.replicas:
+                written_peer_ids.append(replica.peer_id)
+            block = BlockInfo(block_id=block_location.block_id, size=block_location.size,
+                              peer_ids=tuple(written_peer_ids))
+            blocks.append(block)
+
+        with translate_file_system_errors_to_grpc(context):
+            obsolete_blocks = self.registry.commit_file(current_user(), path, request.size, blocks, now=time.time())
+        # Siguiente subtarea: entregar obsolete_blocks (los de la versión anterior) al limpiador,
+        # que los borrará de sus peers con DeleteBlock. Por ahora quedan huérfanos en los peers.
+        return pb.Empty()
+
+    # ---------- Ayudantes de bloques ----------
+
+    def _block_list_reply(self, blocks):
+        """Convierte una lista de BlockInfo del registro en la respuesta pb.BlockList."""
+        block_locations = []
+        for block in blocks:
+            replicas = self._replicas_alive_first(block.peer_ids)
+            block_location = pb.BlockLocation(block_id=block.block_id, size=block.size, replicas=replicas)
+            block_locations.append(block_location)
+        return pb.BlockList(blocks=block_locations, block_size=BLOCK_SIZE_BYTES)
+
+    def _replicas_alive_first(self, peer_ids):
+        """
+        Traduce cada peer_id a su dirección con la tabla de peers, en dos grupos:
+        primero los vivos y al final los muertos (pudieron volver sin que llegue aún su heartbeat;
+        el cliente los prueba solo si fallan los vivos). Se omiten los que la tabla no conoce.
+        """
+        alive_replicas = []
+        dead_replicas = []
+        for peer_id in peer_ids:
+            peer = self.peer_tracker.peer_snapshot(peer_id)
+            if peer is None:
+                continue
+            replica = pb.Replica(peer_id=peer_id, address=peer.address)
+            if peer.alive:
+                alive_replicas.append(replica)
+            else:
+                dead_replicas.append(replica)
+        return alive_replicas + dead_replicas
+
 
 def peer_answers_ping(address, tls_dir):
     """
@@ -200,11 +279,12 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
 
-    def alive_peer_addresses():
-        """Direcciones de los peers vivos, p. ej. ["peer1:7100"]. El registro la llama en cada allocate_blocks."""
-        return [peer.address for peer in peer_tracker.alive_peers()]
+    def peers_available_for_blocks():
+        """peer_id de los peers vivos donde cabe al menos un bloque más. El registro la llama en cada allocate_blocks."""
+        return peer_tracker.alive_peer_ids_with_free_bytes(BLOCK_SIZE_BYTES)
 
-    registry = DictRegistry(live_peers=alive_peer_addresses)   # para cambiar de registro, se cambia esta línea (y el import)
+    registry = DictRegistry(live_peers=peers_available_for_blocks,    # para cambiar de registro, se cambia esta línea (y el import)
+                            block_size=BLOCK_SIZE_BYTES)
     if demo:
         seed_demo_entries(registry)
 

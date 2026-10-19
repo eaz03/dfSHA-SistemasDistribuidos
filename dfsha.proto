@@ -24,12 +24,20 @@ service Superpeer {
 
   // ----- Inspección (pruebas, demo) -----
   rpc ListPeers(Empty) returns (PeerList);                   // estado de todos los peers conocidos
+
+  // ----- Cliente -> Superpeer: bloques -----
+  rpc GetBlockLocations(PathRequest) returns (BlockList);    // open: qué bloques forman el archivo y dónde están
+  rpc AllocateBlocks(AllocateRequest) returns (BlockList);   // antes de subir: el plan (bloques nuevos y sus peers)
+  rpc CommitFile(CommitRequest) returns (Empty);             // después de subir: la versión nueva se vuelve visible
 }
 
 // ======================= Peer =======================
-// Por ahora solo Ping. En los pasos siguientes: WriteBlock, ReadBlock, DeleteBlock.
+// La API de cada peer: guardar, entregar y borrar bloques por su ID (y Ping para verificar la dirección).
 service Peer {
-  rpc Ping(Empty) returns (Empty);    // el superpeer comprueba que la dirección anunciada responde
+  rpc Ping(Empty) returns (Empty);                      // superpeer -> peer: ¿responde la dirección anunciada?
+  rpc WriteBlock(WriteBlockRequest) returns (Empty);    // cliente -> peer: guardar un bloque (reintentar es seguro)
+  rpc ReadBlock(BlockRequest) returns (BlockData);      // cliente -> peer: leer un bloque
+  rpc DeleteBlock(BlockRequest) returns (Empty);        // superpeer -> peer: borrar un bloque obsoleto (idempotente)
 }
 
 // ======================= Mensajes comunes =======================
@@ -101,4 +109,48 @@ message PeerStatus {             // lo que ListPeers informa de cada peer
 
 message PeerList {
   repeated PeerStatus peers = 1;
+}
+
+// ======================= Bloques: peer =======================
+
+message BlockRequest {
+  string block_id = 1;           // 32 caracteres hexadecimales, generado por el registro
+}
+
+message WriteBlockRequest {
+  string block_id = 1;
+  bytes  data = 2;               // hasta un bloque (1 MiB): cabe en el límite de 4 MB por mensaje de gRPC
+}
+
+message BlockData {
+  bytes data = 1;
+}
+
+// ======================= Bloques: superpeer =======================
+
+message Replica {                // un peer que tiene (o tendrá) una copia del bloque
+  string peer_id = 1;            // lo que guarda el registro
+  string address = 2;            // dónde conectarse; lo agrega el superpeer con su tabla de peers
+}
+
+message BlockLocation {
+  string block_id = 1;
+  int64  size = 2;
+  repeated Replica replicas = 3; // GetBlockLocations: peers vivos primero
+}
+
+message BlockList {
+  repeated BlockLocation blocks = 1;   // en orden: el byte N está en blocks[N / block_size]
+  int64 block_size = 2;
+}
+
+message AllocateRequest {
+  string path = 1;
+  int64  size = 2;               // tamaño total del archivo nuevo
+}
+
+message CommitRequest {
+  string path = 1;
+  int64  size = 2;
+  repeated BlockLocation blocks = 3;   // en cada bloque, solo las réplicas que SÍ se escribieron
 }

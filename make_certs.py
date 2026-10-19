@@ -38,6 +38,8 @@ CA_VALIDITY_DAYS = 365
 # dentro del mismo contenedor)
 DEV_NODES = [("superpeer", "sp1", ["sp1", "localhost"]),
              ("peer", "peer1", ["peer1", "localhost"]),
+             ("peer", "peer2", ["peer2"]),
+             ("peer", "peer3", ["peer3"]),
              ("client", "client", ["client"])]
 
 

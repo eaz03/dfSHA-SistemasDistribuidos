@@ -7,6 +7,8 @@ la llamada una vez, sin que el usuario del montaje lo note. Para eso se guardan 
 contraseña en memoria mientras el montaje está activo.
 """
 
+import os
+import sys
 import threading
 
 import grpc
@@ -14,6 +16,30 @@ import grpc
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
 from auth_interceptor import bearer_metadata
+from tls import secure_channel
+
+DEFAULT_CLIENT_TLS_DIR = "certs/client"
+
+
+def credentials_from_environment():
+    """
+    (usuario, contraseña, carpeta del certificado) de las variables DFSHA_USER, DFSHA_PASSWORD y
+    DFSHA_TLS_DIR, las mismas que usa el montaje. Termina el programa con un mensaje si faltan.
+    En Docker Compose el contenedor client ya las tiene (vienen del .env).
+    """
+    username = os.environ.get("DFSHA_USER")
+    password = os.environ.get("DFSHA_PASSWORD")
+    if not username or not password:
+        sys.exit("set DFSHA_USER and DFSHA_PASSWORD (see .env.example), or run this in the client container")
+    return username, password, os.environ.get("DFSHA_TLS_DIR", DEFAULT_CLIENT_TLS_DIR)
+
+
+def authenticated_superpeer_stub(address, username, password, tls_dir, timeout=5):
+    """SuperpeerStub por mTLS que hace Login y adjunta el token en cada llamada (para scripts y pruebas)."""
+    channel = secure_channel(address, tls_dir)
+    login_session = LoginSession(channel, username, password, timeout)
+    login_session.token()
+    return rpc.SuperpeerStub(grpc.intercept_channel(channel, BearerTokenInterceptor(login_session)))
 
 
 class LoginSession:

@@ -34,7 +34,7 @@ def fixed_test_peers():
     Peers inventados, para usar DictRegistry sin superpeer (p. ej. en pruebas).
     El superpeer le pasa en cambio una función que consulta su tabla de peers vivos (PeerTracker).
     """
-    return ["peer1:7001", "peer2:7002"]
+    return ["peer1", "peer2"]
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ class DictRegistry(Registry):
         self._namespaces = {}            # usuario -> {path absoluto: {"is_dir", "size", "mtime", "blocks"}}
 
         # Una función y no una lista: los peers aparecen y se caen, así que se pregunta en cada asignación
-        self._live_peers = live_peers                    # () -> lista de direcciones "host:puerto"
+        self._live_peers = live_peers                    # () -> lista de peer_id disponibles, p. ej. ["peer1", "peer2"]
         self._block_size = block_size
         self._replication_factor = replication_factor
         self._next_peer = 0              # cursor del round robin: dónde empieza el próximo bloque
@@ -124,20 +124,20 @@ class DictRegistry(Registry):
             raise FileSystemError(errno.EISDIR, path)
         return file_entry
 
-    def _choose_peers(self, peer_addresses):
+    def _choose_peers(self, peer_ids, replica_count):
         """
-        Elige replication_factor peers distintos para un bloque, por turnos (round robin),
+        Elige replica_count peers distintos para un bloque, por turnos (round robin),
         como quien reparte cartas: toma los siguientes peers desde el cursor y deja el cursor
         donde terminó, para que el próximo bloque empiece en otros peers.
-        Con peers [A, B, C, D] y factor 2: bloque 0 -> (A, B), bloque 1 -> (C, D), bloque 2 -> (A, B)...
-        Quien llama garantiza que hay al menos replication_factor peers, así que nunca se repite uno.
+        Con peers [A, B, C, D] y 2 réplicas: bloque 0 -> (A, B), bloque 1 -> (C, D), bloque 2 -> (A, B)...
+        Quien llama garantiza que replica_count <= len(peer_ids), así que nunca se repite uno.
         """
-        chosen_peers = []
-        for offset in range(self._replication_factor):
-            position = (self._next_peer + offset) % len(peer_addresses)   # % da la vuelta al final de la lista
-            chosen_peers.append(peer_addresses[position])
-        self._next_peer = (self._next_peer + self._replication_factor) % len(peer_addresses)
-        return tuple(chosen_peers)
+        chosen_peer_ids = []
+        for offset in range(replica_count):
+            position = (self._next_peer + offset) % len(peer_ids)   # % da la vuelta al final de la lista
+            chosen_peer_ids.append(peer_ids[position])
+        self._next_peer = (self._next_peer + replica_count) % len(peer_ids)
+        return tuple(chosen_peer_ids)
 
     def _discard_pending_blocks(self, user, path):
         """
@@ -308,26 +308,32 @@ class DictRegistry(Registry):
         with self._lock:
             user_namespace = self._namespace(user)
 
-            # 1. Validaciones: es un archivo existente, el tamaño tiene sentido y hay peers suficientes
+            # 1. Validaciones: es un archivo existente, el tamaño tiene sentido y hay al menos un peer
             self._get_file_entry(user_namespace, path)
             if file_size < 0:
                 raise FileSystemError(errno.EINVAL, path)
-            peer_addresses = list(self._live_peers())    # una sola foto de los peers para todo el archivo
-            if file_size > 0 and len(peer_addresses) < self._replication_factor:
-                raise FileSystemError(errno.ENOSPC, path)    # no se escribe con menos réplicas de las acordadas
+            peer_ids = list(self._live_peers())          # una sola foto de los peers para todo el archivo
+            if file_size > 0 and len(peer_ids) == 0:
+                raise FileSystemError(errno.ENOSPC, path)    # sin peers no hay dónde guardar nada
 
-            # 2. Partir file_size en bloques de block_size; el último se queda con lo que sobra
+            # 2. Cuántas réplicas por bloque: las acordadas, o las que se puedan si hay menos peers.
+            #    Con factor 2 y un solo peer vivo, cada bloque queda en ese peer (subreplicado):
+            #    es mejor guardar el archivo con una copia que rechazarlo. La re-replicación (Paso 4)
+            #    completará las copias cuando haya más peers.
+            replica_count = min(self._replication_factor, len(peer_ids))
+
+            # 3. Partir file_size en bloques de block_size; el último se queda con lo que sobra
             #    2.5 MiB con bloques de 1 MiB -> [1 MiB, 1 MiB, 0.5 MiB]
             blocks = []
             remaining_bytes = file_size
             while remaining_bytes > 0:
                 this_block_size = min(self._block_size, remaining_bytes)
                 block = BlockInfo(block_id=uuid.uuid4().hex, size=this_block_size,
-                                  peers=self._choose_peers(peer_addresses))
+                                  peer_ids=self._choose_peers(peer_ids, replica_count))
                 blocks.append(block)
                 remaining_bytes -= this_block_size
 
-            # 3. Recordar a quién y cuándo se le asignó cada bloque, para validarlo en commit_file
+            # 4. Recordar a quién y cuándo se le asignó cada bloque, para validarlo en commit_file
             #    y para descartarlo si el plan se abandona (expire_pending_blocks)
             allocated_at = self._clock()
             for block in blocks:
@@ -344,34 +350,56 @@ class DictRegistry(Registry):
             if size < 0:
                 raise FileSystemError(errno.EINVAL, path)
 
-            # 2. Cada bloque es exactamente uno de los asignados a este usuario y path, sin repetir.
-            #    Fase 8: _pending_blocks vive en memoria y no sobrevive a un reinicio, así que el
-            #    replay desde un log no podrá pasar por esta validación (el log solo guardará
-            #    commits que ya la pasaron).
+            # 2. Cada bloque es uno de los asignados a este usuario y path, sin repetir, y quedó
+            #    escrito en al menos uno de sus peers asignados (puede que no en todos, si alguno
+            #    se cayó durante la subida). Se arma un BlockInfo nuevo con peer_ids como tuple:
+            #    desde protobuf llega una lista, y ('a', 'b') != ['a', 'b'] en Python.
+            #    Persistencia (B3): _pending_blocks vive en memoria y no sobrevive a un reinicio,
+            #    así que el replay desde un log no podrá pasar por esta validación (el log solo
+            #    guardará commits que ya la pasaron).
+            committed_blocks = []
             seen_block_ids = set()
             for block in blocks:
                 pending = self._pending_blocks.get(block.block_id)
-                if pending is None or (pending.user, pending.path, pending.block) != (user, path, block):
-                    raise FileSystemError(errno.EINVAL, path)
+                if pending is None or pending.user != user or pending.path != path:
+                    raise FileSystemError(errno.EINVAL, path)       # no se asignó a este archivo
+                if block.size != pending.block.size:
+                    raise FileSystemError(errno.EINVAL, path)       # cambió de tamaño
                 if block.block_id in seen_block_ids:
-                    raise FileSystemError(errno.EINVAL, path)
+                    raise FileSystemError(errno.EINVAL, path)       # bloque repetido
                 seen_block_ids.add(block.block_id)
+
+                written_peer_ids = tuple(block.peer_ids)
+                if len(written_peer_ids) == 0:
+                    raise FileSystemError(errno.EINVAL, path)       # no quedó guardado en ningún peer
+                if len(set(written_peer_ids)) != len(written_peer_ids):
+                    raise FileSystemError(errno.EINVAL, path)       # un peer repetido
+                for peer_id in written_peer_ids:
+                    if peer_id not in pending.block.peer_ids:
+                        raise FileSystemError(errno.EINVAL, path)   # un peer que no se le asignó
+
+                committed_block = BlockInfo(block_id=block.block_id, size=block.size,
+                                            peer_ids=written_peer_ids)
+                committed_blocks.append(committed_block)
 
             # 3. Los tamaños encajan: todos menos el último miden block_size (para que el byte N
             #    siga estando en blocks[N // block_size]) y entre todos suman size
-            for block in blocks[:-1]:
+            total_bytes = 0
+            for block in committed_blocks[:-1]:
                 if block.size != self._block_size:
                     raise FileSystemError(errno.EINVAL, path)
-            if sum(block.size for block in blocks) != size:
+            for block in committed_blocks:
+                total_bytes += block.size
+            if total_bytes != size:
                 raise FileSystemError(errno.EINVAL, path)
 
             # 4. Cambiar de versión de una vez: como estamos dentro del lock, nadie ve una mezcla.
             #    El mtime del directorio no cambia: escribir un archivo no agrega ni quita hijos.
             obsolete_blocks = file_entry["blocks"]
-            file_entry["blocks"] = blocks
+            file_entry["blocks"] = committed_blocks
             file_entry["size"] = size
             file_entry["mtime"] = now
-            for block in blocks:
+            for block in committed_blocks:
                 del self._pending_blocks[block.block_id]     # ya no están pendientes: son del archivo
             return obsolete_blocks
 
