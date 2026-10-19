@@ -71,7 +71,8 @@ ls -R
 rm -r proyectos
 ```
 
-Para detener todo: `docker compose down`. El registro vive en memoria, así que se pierde al detener el superpeer.
+Para detener todo: `docker compose down`. El registro del superpeer es persistente (log de operaciones +
+snapshot en el volumen `sp1-data`): sobrevive a reinicios y a `down`; `docker compose down -v` lo borra.
 
 ## Desarrollo
 
@@ -101,4 +102,4 @@ Opciones útiles:
 
 - Todavía no se guarda contenido: `cat`, `cp` y escribir en un archivo fallan. Los archivos existen solo como entradas del registro, con tamaño 0.
 - Un solo superpeer y un usuario fijo de prueba (`demo`): sin autenticación ni cifrado todavía.
-- El registro está en memoria: se reinicia junto con el superpeer.
+- El registro se guarda en disco en un solo superpeer: todavía no se replica a otros superpeers.

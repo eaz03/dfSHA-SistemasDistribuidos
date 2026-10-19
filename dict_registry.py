@@ -37,6 +37,16 @@ def fixed_test_peers():
     return ["peer1:7001", "peer2:7002"]
 
 
+def block_to_dict(block):
+    """BlockInfo -> diccionario guardable en JSON (para el log y el snapshot)."""
+    return {"block_id": block.block_id, "size": block.size, "peers": list(block.peers)}
+
+
+def block_from_dict(data):
+    """Diccionario de block_to_dict -> BlockInfo (peers vuelve a ser tuple)."""
+    return BlockInfo(block_id=data["block_id"], size=data["size"], peers=tuple(data["peers"]))
+
+
 @dataclass(frozen=True)
 class _PendingBlock:
     """Un bloque asignado por allocate_blocks que todavía no tiene commit (interno: no sale del registro)."""
@@ -138,6 +148,21 @@ class DictRegistry(Registry):
             chosen_peers.append(peer_addresses[position])
         self._next_peer = (self._next_peer + self._replication_factor) % len(peer_addresses)
         return tuple(chosen_peers)
+
+    def _apply_commit(self, file_entry, size, blocks, now):
+        """
+        La mitad "aplicar" de un commit: pone blocks como la versión actual del archivo y devuelve
+        los bloques de la versión anterior. No valida: lo usan commit_file (después de validar) y
+        replay_commit_file (con un commit que ya se validó cuando ocurrió).
+        El mtime del directorio no cambia: escribir un archivo no agrega ni quita hijos.
+        """
+        obsolete_blocks = file_entry["blocks"]
+        file_entry["blocks"] = blocks
+        file_entry["size"] = size
+        file_entry["mtime"] = now
+        for block in blocks:
+            self._pending_blocks.pop(block.block_id, None)   # ya no están pendientes: son del archivo
+        return obsolete_blocks
 
     def _discard_pending_blocks(self, user, path):
         """
@@ -345,9 +370,9 @@ class DictRegistry(Registry):
                 raise FileSystemError(errno.EINVAL, path)
 
             # 2. Cada bloque es exactamente uno de los asignados a este usuario y path, sin repetir.
-            #    Fase 8: _pending_blocks vive en memoria y no sobrevive a un reinicio, así que el
-            #    replay desde un log no podrá pasar por esta validación (el log solo guardará
-            #    commits que ya la pasaron).
+            #    _pending_blocks vive en memoria y no sobrevive a un reinicio: por eso el replay
+            #    desde un log usa replay_commit_file, que no pasa por aquí (el log solo guarda
+            #    commits que ya pasaron estas validaciones).
             seen_block_ids = set()
             for block in blocks:
                 pending = self._pending_blocks.get(block.block_id)
@@ -365,20 +390,44 @@ class DictRegistry(Registry):
             if sum(block.size for block in blocks) != size:
                 raise FileSystemError(errno.EINVAL, path)
 
-            # 4. Cambiar de versión de una vez: como estamos dentro del lock, nadie ve una mezcla.
-            #    El mtime del directorio no cambia: escribir un archivo no agrega ni quita hijos.
-            obsolete_blocks = file_entry["blocks"]
-            file_entry["blocks"] = blocks
-            file_entry["size"] = size
-            file_entry["mtime"] = now
-            for block in blocks:
-                del self._pending_blocks[block.block_id]     # ya no están pendientes: son del archivo
-            return obsolete_blocks
+            # 4. Cambiar de versión de una vez: como estamos dentro del lock, nadie ve una mezcla
+            return self._apply_commit(file_entry, size, blocks, now)
+
+    def replay_commit_file(self, user, path, size, blocks, now):
+        with self._lock:
+            file_entry = self._get_file_entry(self._namespace(user), path)
+            return self._apply_commit(file_entry, size, list(blocks), now)
 
     def get_block_locations(self, user, path):
         with self._lock:
             file_entry = self._get_file_entry(self._namespace(user), path)
             return list(file_entry["blocks"])    # copia: quien la recibe no puede cambiar el registro sin el lock
+
+    def export_state(self):
+        with self._lock:
+            namespaces = {}
+            for user, user_namespace in self._namespaces.items():
+                namespaces[user] = {}
+                for path, entry in user_namespace.items():
+                    exported_entry = {"is_dir": entry["is_dir"], "size": entry["size"], "mtime": entry["mtime"]}
+                    if not entry["is_dir"]:
+                        exported_entry["blocks"] = [block_to_dict(block) for block in entry["blocks"]]
+                    namespaces[user][path] = exported_entry
+            return {"namespaces": namespaces}
+
+    def import_state(self, state):
+        with self._lock:
+            namespaces = {}
+            for user, exported_namespace in state["namespaces"].items():
+                namespaces[user] = {}
+                for path, exported_entry in exported_namespace.items():
+                    entry = {"is_dir": exported_entry["is_dir"], "size": exported_entry["size"],
+                             "mtime": exported_entry["mtime"]}
+                    if not entry["is_dir"]:
+                        entry["blocks"] = [block_from_dict(block) for block in exported_entry["blocks"]]
+                    namespaces[user][path] = entry
+            self._namespaces = namespaces
+            self._pending_blocks = {}        # los planes no se guardan: son estado temporal
 
     def expire_pending_blocks(self):
         with self._lock:

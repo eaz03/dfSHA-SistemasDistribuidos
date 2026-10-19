@@ -2,7 +2,8 @@ services:
   sp1:
     build: .
     command: python superpeer.py --id sp1 --port 7000 --demo
-    volumes: [".:/app"]
+    # /data/registry: log y snapshot del registro, sobreviven a reinicios y a docker compose down
+    volumes: [".:/app", "sp1-data:/data"]
 
   peer1:
     build: .
@@ -23,3 +24,4 @@ services:
 
 volumes:
   peer1-data:     # carpeta de bloques de peer1: sobrevive a docker compose down, se borra con down -v
+  sp1-data:       # registro persistente del superpeer (log + snapshot)
