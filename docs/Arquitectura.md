@@ -54,9 +54,9 @@ de ese archivo se genera el código de cliente (stub) y de servidor (servicer).
 
 | Enlace | Para qué | RPCs | Protección |
 |---|---|---|---|
-| **Cliente → Superpeer** | Login, espacio de nombres, plan y ubicación de bloques | `Login`; `Stat`, `ListDir`, `MakeDir`, `RemoveDir`, `CreateFile`, `Delete`, `Rename`; `AllocateBlocks`, `CommitFile`, `GetBlockLocations`; `ListPeers` | mTLS (rol `client`) + token de sesión (salvo `Login`) |
+| **Cliente → Superpeer** | Login, espacio de nombres, plan y ubicación de bloques | `Login`; `Stat`, `ListDir`, `MakeDir`, `RemoveDir`, `CreateFile`, `Delete`, `Rename`; `AllocateBlocks`, `CommitFile`, `GetBlockLocations`; `ListPeers`, `ListSuperpeers` | mTLS (rol `client`) + token de sesión (salvo `Login`) |
 | **Cliente → Peer** | Subir y bajar bloques | `WriteBlock`, `ReadBlock` | mTLS + **permiso de bloque** firmado por el superpeer |
-| **Superpeer ↔ Superpeer** | Unirse a la federación, heartbeats entre superpeers, envío del log de operaciones | Servicio de federación del `.proto` | mTLS (rol `superpeer`) |
+| **Superpeer ↔ Superpeer** | Heartbeats con el estado de cada superpeer, envío del log de operaciones, ponerse al día, fusionar usuarios | Servicio `Federation`: `Heartbeat`, `AppendLog`, `FetchUser`, `FetchUserRecords` | mTLS (solo rol `superpeer`) |
 | **Peer → Superpeer** | Registrarse y avisar que sigue vivo | `RegisterPeer`, `Heartbeat` | mTLS (solo rol `peer`) |
 | **Superpeer → Peer** | Verificar la dirección, borrar bloques obsoletos, ordenar copias | `Ping`, `DeleteBlock`, `ReplicateBlock` | mTLS (solo rol `superpeer`) |
 | **Peer → Peer** | Copiar un bloque al re-replicar | `ReadBlock` (con el permiso que vino en `ReplicateBlock`) | mTLS + permiso de bloque |
@@ -67,10 +67,12 @@ que subir el límite o enviarlos en partes.
 
 ## 3. Cliente
 
-**Conexión y failover.** El cliente recibe una lista de superpeers y se conecta al primero que
-responda. Si su superpeer deja de responder, reintenta con el siguiente de la lista. Como el token
-de sesión lo firma cada superpeer, al cambiar de superpeer el cliente vuelve a hacer login solo
-(ver autenticación).
+**Conexión y failover.** El cliente recibe la lista de superpeers, hace login en el primero que
+responda y este le dice cuál es el **dueño** de su usuario (`owner_address`): el cliente se conecta a
+ese. Si su superpeer deja de responder, o responde que ya no atiende a ese usuario (`UNAVAILABLE`), el
+cliente prueba el siguiente de la lista y repite la llamada, hasta 20 s; mientras tanto la operación
+queda en espera en lugar de fallar. Como cada superpeer firma sus propios tokens, al cambiar de
+superpeer el cliente vuelve a hacer login solo.
 
 **Autenticación.** Al conectarse, el cliente hace `Login` con usuario y contraseña y recibe un
 token de sesión (JWT, 1 hora). Un interceptor de gRPC lo adjunta en la metadata de cada llamada
@@ -114,6 +116,8 @@ quedaron; si no quedó en ninguna, `EIO`.
 | `user_store.py` / `json_user_store.py` | Usuarios y hashes de contraseñas |
 | `block_cleaner.py` | Borra de los peers los bloques obsoletos, en segundo plano |
 | `replication_monitor.py` | Devuelve a los bloques las réplicas perdidas, en segundo plano |
+| `federation.py` | Membresía de la federación: heartbeats entre superpeers, dueño de cada usuario, ponerse al día |
+| `replicated_registry.py` | Envuelve al registro persistente: solo el dueño modifica, y cada modificación se envía a los demás superpeers |
 | `dfsha/common/auth_interceptor.py` | Interceptores: token de sesión (usuarios) y rol del certificado (nodos) |
 
 ### 4.2 Contenido del registro
@@ -166,22 +170,36 @@ su costo promedio por operación es despreciable frente al `fsync`.
 
 ### 4.4 Federación y sincronización del registro
 
-Con varios superpeers en máquinas distintas, cada uno con una copia completa de los metadatos, la
-caída de uno no deja a nadie sin servicio:
+Varios superpeers en máquinas distintas (`--superpeers sp1=sp1:7000,sp2=sp2:7000`, la misma lista en
+todos), cada uno con una copia completa de los metadatos. Las capas del registro quedan así:
+`DictRegistry` (memoria) → `PersistentRegistry` (log en disco) → `ReplicatedRegistry` (federación).
 
-1. **Unirse.** Un superpeer nuevo entra con la dirección de uno existente (la semilla). Recibe la
-   lista de miembros y una copia del registro.
-2. **Vigilarse.** Los superpeers se envían heartbeats entre sí, como los peers al superpeer.
-3. **Mantener las copias al día.** Cada usuario tiene un **superpeer dueño**, que aplica sus
-   operaciones y envía a los demás las líneas del log de operaciones (sección 4.3). Los demás las
-   repiten y obtienen el mismo resultado gracias al parámetro `now`. Hay un solo escritor por
-   usuario, así que no hay conflictos entre copias.
-4. **Tolerar la caída del dueño.** Si el dueño de un grupo de usuarios cae, el siguiente de la
-   lista de miembros toma a esos usuarios, con la copia que ya tenía de su registro.
-5. **Peers.** Se registran en todos los superpeers de su lista, así que cualquiera sabe qué peers
-   están vivos, y cada peer conoce la clave pública de cada superpeer para verificar sus permisos de
-   bloque.
-6. **Cliente.** Si su superpeer deja de responder, reintenta con el siguiente (failover).
+1. **Dueño de cada usuario.** Cada usuario tiene un superpeer *home* (en `users.json`, con
+   `manage_users add --home`; sin home, el primero de la lista). Su dueño es el home si está vivo y
+   listo; si no, el siguiente de la lista que lo esté. Todos calculan lo mismo con la misma
+   información, sin votar. Solo el dueño modifica el espacio de nombres de ese usuario; los demás
+   responden `EAGAIN` (que viaja como `UNAVAILABLE`) y el cliente se cambia al dueño. Como los
+   usuarios son disjuntos, dos superpeers nunca modifican los mismos datos: todos están activos a la
+   vez, cada uno con sus usuarios.
+2. **Vigilarse.** Cada superpeer envía un `Heartbeat` a los demás cada segundo, con si está listo y
+   hasta dónde va el log de cada usuario. Sin noticias en 4 segundos, está muerto.
+3. **Replicación sincrónica.** El dueño aplica la operación (que queda en su log) y la envía a los
+   demás con `AppendLog` **antes de responderle al cliente**: cuando el cliente recibe "ok", la
+   operación ya está en los otros superpeers vivos. Los demás la repiten y llegan al mismo estado
+   gracias a que las operaciones son deterministas (sección 4.3).
+4. **Épocas.** Cada vez que un superpeer empieza a atender a un usuario abre una **época** nueva,
+   mayor que cualquiera conocida, y cada línea del log lleva su posición (época, quién la abrió,
+   número). Una operación de una época vieja, de un dueño anterior que no se enteró de que perdió
+   al usuario, se rechaza, y ese superpeer deja de atenderlo.
+5. **Ponerse al día.** Un superpeer que arranca no atiende usuarios hasta estar al día. Si otro va
+   más adelante con un usuario, le pide su estado completo (`FetchUser`) y reemplaza su copia. Lo
+   mismo hace uno que se quedó atrás (por ejemplo, porque estuvo caído).
+6. **Usuarios.** Los heartbeats llevan una huella de `users.json`; si difiere, los superpeers se
+   piden los usuarios (`FetchUserRecords`) y los fusionan (gana el cambio más reciente). Un usuario
+   nuevo llega a los demás superpeers en unos segundos.
+7. **Peers.** Se registran en todos los superpeers de la lista, así que cada uno tiene su tabla de
+   peers vivos, y guardan la clave pública de cada superpeer para verificar sus permisos de bloque.
+   El monitor de réplicas y el limpiador de cada superpeer actúan solo sobre los usuarios que atiende.
 
 ### 4.5 Tabla de peers y detección de fallas
 
@@ -327,11 +345,14 @@ descartan en ese momento (sección 7).
 
 ### 6.6 Caída de un superpeer (federación)
 
-1. Los demás superpeers dejan de recibir sus heartbeats.
-2. El siguiente de la lista de miembros toma a los usuarios del caído, con la copia de su registro.
-3. Los clientes de esos usuarios reintentan con el siguiente superpeer de su lista y vuelven a
-   hacer login.
-4. Los peers siguen registrados en los demás superpeers: la tabla de peers vivos sigue disponible.
+1. Los demás superpeers dejan de recibir sus heartbeats y a los 4 segundos lo dan por muerto.
+2. El siguiente de la lista toma a los usuarios del caído, con su copia del registro, y abre una
+   época nueva para cada uno.
+3. Los clientes de esos usuarios reciben `UNAVAILABLE`, se cambian al siguiente superpeer, vuelven
+   a hacer login y repiten la llamada. Medido con el montaje en uso: la operación en curso queda en
+   espera unos **6,5 segundos** y después todo sigue con el otro superpeer.
+4. Cuando el caído vuelve, se pone al día (`FetchUser`) antes de atender, y recupera a los usuarios
+   de los que es home.
 
 ## 7. Consistencia
 
@@ -348,8 +369,10 @@ descartan en ese momento (sección 7).
 - **Replicación de bloques.** Cada bloque tiene k = 2 réplicas idénticas (los bloques nunca se
   modifican: cada versión usa IDs nuevos), así que las réplicas no pueden divergir. El cifrado
   autenticado detecta un bloque corrupto o manipulado (`EIO`) y el cliente lee de otra réplica.
-- **Replicación de metadatos.** Un solo escritor por usuario (su superpeer dueño) y un log
-  determinista que los demás repiten en el mismo orden: todas las copias llegan al mismo estado.
+- **Replicación de metadatos.** Un solo escritor por usuario (su superpeer dueño), replicación
+  sincrónica (el dueño espera a los demás antes de responder) y un log determinista que los demás
+  repiten en el mismo orden: todas las copias llegan al mismo estado. Las **épocas** impiden que un
+  dueño anterior que no se enteró del cambio siga escribiendo.
 - **Durabilidad.** Cada modificación está en disco (`fsync`) antes de responder.
 - **Ventana conocida.** Entre aplicar una operación en memoria y terminar su `fsync`, una consulta
   podría ver un cambio que todavía no es durable; si el superpeer cae justo ahí, ese cambio se pierde
@@ -418,6 +441,8 @@ límites. Los errores de autenticación se ven como "Permission denied".
 | `peer_ids` en el registro | Direcciones | La dirección de un peer puede cambiar; su ID no |
 | Log + snapshot | Base de datos, guardar todo en cada cambio | Escritura secuencial barata, recuperación acotada y el mismo log sirve para sincronizar superpeers |
 | Federación con dueño por usuario | NameNode activo con respaldo pasivo | Alta disponibilidad sin un jefe: justifica la arquitectura P2P federada |
+| Replicación sincrónica de metadatos | Asincrónica | Un "ok" ya está en los demás superpeers: un failover no pierde operaciones confirmadas |
+| Dueño calculado (home y orden de la lista) | Elección por votación (Raft, Paxos) | Simple y sin coordinación con dos superpeers; el costo es el corte de red (sección 11) |
 | mTLS para todos los nodos, incluido el cliente | TLS solo en el servidor | Un solo puerto y una sola configuración; solo máquinas autorizadas llegan a conectarse |
 | JWT con EdDSA | HMAC (clave compartida) | Los peers verifican permisos sin poder fabricarlos |
 | Cifrado en el peer | Cifrado en el cliente (extremo a extremo) | Independiente del resto y sin gestión de claves por usuario; el cifrado en el cliente queda como mejora |
@@ -438,6 +463,18 @@ límites. Los errores de autenticación se ven como "Permission denied".
 - **Rendimiento del log.** Cada modificación hace un `fsync` (~250 modificaciones de metadatos por
   segundo); agrupar varias en un solo `fsync` (*group commit*) lo multiplicaría.
 - **Réplicas de más** cuando un peer muerto vuelve: no se recortan.
+- **Corte de red entre dos superpeers vivos.** Si dejan de verse pero los dos siguen atendiendo
+  clientes, ambos pueden tomar al mismo usuario por un rato; al reconectarse gana la época más nueva y
+  se pierden los cambios del otro lado. Con tres o más superpeers y una decisión por mayoría (como
+  Raft) no pasaría.
+- **Lecturas durante el failover.** Un archivo que se está leyendo justo cuando cae su superpeer
+  puede devolver `Input/output error` durante unos segundos (hasta que el cliente se cambia de
+  superpeer); las operaciones nuevas, en cambio, quedan en espera y siguen solas.
+- **Usuarios nuevos.** Una cuenta recién creada tarda unos segundos en llegar a los demás
+  superpeers; en ese momento, un login que llegue a otro superpeer la rechaza.
+- **Usuarios borrados.** Borrar un usuario no borra su espacio de nombres ni sus bloques.
+- **Bloques huérfanos al caer un dueño** con una subida a medias o borrados pendientes: quedan en los
+  peers hasta que existan los reportes de bloques.
 - **Cifrado de extremo a extremo** (el cliente cifra antes de subir): los peers no verían los datos
   ni en memoria, pero exige gestionar claves por usuario.
 

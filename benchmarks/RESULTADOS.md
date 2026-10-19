@@ -135,3 +135,20 @@ casi todos **espera intencional**: el retardo de 60 s evita copiar todos los blo
 solo se está reiniciando. Es un parámetro (`--replication-delay`): bajarlo acorta la ventana en que
 un bloque tiene una sola copia, a cambio de copias innecesarias. El superpeer vuelve a atender en
 menos de 2 s y sin perder nada; los 6 s siguientes son los peers volviendo a registrarse.
+
+## 5. Federación de superpeers
+
+`python3 -m tests.integration.test_superpeers` y mediciones a mano con el montaje en uso (`sp1` detenido
+con `docker compose kill` y con `docker compose stop`):
+
+| Medición | Resultado |
+|---|---|
+| Superpeer caído dado por muerto por los demás | 4 s sin heartbeats |
+| Operación del montaje en curso al caer el superpeer (listar, `stat`, leer un archivo) | queda en espera ~6,5 s y sigue con el otro superpeer |
+| Archivo que se estaba leyendo con `cmp` justo en la caída | `Input/output error` durante unos 15 s, luego funciona |
+| Superpeer que vuelve: ponerse al día y recuperar a sus usuarios | ~5,6 s |
+| Usuario nuevo visible en el otro superpeer | 2 a 4 s |
+
+**Análisis.** El failover no pierde operaciones confirmadas (la replicación es sincrónica) y las
+operaciones nuevas no fallan: esperan unos segundos y siguen. La ventana de errores al leer un
+archivo ya abierto es una limitación conocida del cliente.
