@@ -2,8 +2,11 @@
 Herramienta de línea de comandos para DFSha, sin FUSE: usa client.py para hablar por gRPC
 con el superpeer y con los peers.
 
-TEMPORAL: sirve para tener archivos con contenido mientras el mount no escribe.
-Se borra cuando el mount escriba (ver docs/PLAN.md).
+RESPALDO: el acceso normal a DFSha es el montaje FUSE (mount.py). Esta herramienta queda para:
+  - subir y bajar archivos si el montaje no está disponible o falla, y para distinguir si un
+    problema es del montaje (FUSE) o del resto del sistema (superpeer, peers, red);
+  - ver en qué peers quedó cada bloque de un archivo (blocks), p. ej. para mostrar las réplicas;
+  - las pruebas: tests/integration/test_mount.py sube y baja archivos con ella para comprobar el contenido sin FUSE.
 
 Uso, desde WSL (dentro de los contenedores, la carpeta del proyecto se ve en /app):
   docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md     subir un archivo local
