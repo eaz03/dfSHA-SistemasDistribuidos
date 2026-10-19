@@ -79,7 +79,8 @@ def upload(superpeer, peers, path, data, replicas_to_write=None):
         if replicas_to_write is not None:
             replicas = replicas[:replicas_to_write]
         for replica in replicas:
-            write_request = pb.WriteBlockRequest(block_id=planned_block.block_id, data=block_data)
+            write_request = pb.WriteBlockRequest(block_id=planned_block.block_id, data=block_data,
+                                                 access_token=planned_block.access_token)
             peers.stub(replica.address).WriteBlock(write_request, timeout=RPC_TIMEOUT_SECONDS)
         committed_block = pb.BlockLocation(block_id=planned_block.block_id, size=planned_block.size, replicas=replicas)
         committed_blocks.append(committed_block)
@@ -94,7 +95,7 @@ def download(superpeer, peers, path):
     pieces = []
     for block_location in locations.blocks:
         first_replica = block_location.replicas[0]
-        read_request = pb.BlockRequest(block_id=block_location.block_id)
+        read_request = pb.BlockRequest(block_id=block_location.block_id, access_token=block_location.access_token)
         pieces.append(peers.stub(first_replica.address).ReadBlock(read_request, timeout=RPC_TIMEOUT_SECONDS).data)
     return b"".join(pieces), locations
 

@@ -20,6 +20,9 @@ Reglas por rol, que aplican los servidores leyendo el certificado de quien llama
 - Solo un `peer` puede registrarse en el superpeer (`RegisterPeer`, `Heartbeat`).
 - Solo un `superpeer` puede dar órdenes a un peer (`Ping`, y después `DeleteBlock`).
 - Las operaciones de archivos exigen además un token de usuario válido.
+- Para leer o escribir un bloque en un peer, un cliente necesita un **permiso de bloque** firmado por
+  el superpeer (lo recibe junto con el plan o las ubicaciones del archivo). Los peers obtienen la clave
+  pública para verificarlos al registrarse en el superpeer: no hay que copiarla a mano.
 
 Sin un certificado firmado por la CA, una máquina **no llega a conectarse**: la conexión se corta
 en el handshake, antes de cualquier RPC.

@@ -133,7 +133,8 @@ class DFSClient:
         tried_peer_ids = []
         for replica in block_location.replicas:
             tried_peer_ids.append(replica.peer_id)
-            request = pb.BlockRequest(block_id=block_location.block_id)
+            # El permiso de lectura que entregó el superpeer: sin él, el peer no entrega el bloque
+            request = pb.BlockRequest(block_id=block_location.block_id, access_token=block_location.access_token)
             try:
                 data = self._peer_stub(replica.address).ReadBlock(request, timeout=self.timeout).data
             except grpc.RpcError:
@@ -189,7 +190,8 @@ class DFSClient:
         tried_peer_ids = []
         for replica in block_location.replicas:
             tried_peer_ids.append(replica.peer_id)
-            request = pb.WriteBlockRequest(block_id=block_location.block_id, data=data)
+            request = pb.WriteBlockRequest(block_id=block_location.block_id, data=data,
+                                           access_token=block_location.access_token)   # permiso de escritura del plan
             try:
                 self._peer_stub(replica.address).WriteBlock(request, timeout=self.timeout)
             except grpc.RpcError:
