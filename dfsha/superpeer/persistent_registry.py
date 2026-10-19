@@ -76,6 +76,9 @@ class PersistentRegistry(Registry):
     def expire_pending_blocks(self):
         return self._inner.expire_pending_blocks()
 
+    def under_replicated_blocks(self, available_peer_ids):
+        return self._inner.under_replicated_blocks(available_peer_ids)
+
     def export_state(self):
         return self._inner.export_state()
 
@@ -121,6 +124,13 @@ class PersistentRegistry(Registry):
             self._append({"op": "commit_file", "user": user, "path": path, "size": size,
                           "blocks": [block_to_dict(block) for block in blocks], "now": now})
             return obsolete_blocks
+
+    def add_block_replica(self, user, path, block_id, peer_id):
+        # Se anota: si no, después de un reinicio el registro olvidaría la copia y la volvería a hacer
+        with self._lock:
+            self._inner.add_block_replica(user, path, block_id, peer_id)
+            self._append({"op": "add_block_replica", "user": user, "path": path,
+                          "block_id": block_id, "peer_id": peer_id})
 
     def replay_commit_file(self, user, path, size, blocks, now):
         blocks = list(blocks)
@@ -216,6 +226,8 @@ class PersistentRegistry(Registry):
             self._inner.delete_file(record["user"], record["path"], record["now"])
         elif operation == "rename":
             self._inner.rename(record["user"], record["source_path"], record["destination_path"], record["now"])
+        elif operation == "add_block_replica":
+            self._inner.add_block_replica(record["user"], record["path"], record["block_id"], record["peer_id"])
         elif operation == "commit_file":
             blocks = [block_from_dict(block) for block in record["blocks"]]
             self._inner.replay_commit_file(record["user"], record["path"], record["size"], blocks, record["now"])
