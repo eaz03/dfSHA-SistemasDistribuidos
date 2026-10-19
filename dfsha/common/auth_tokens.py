@@ -24,7 +24,7 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from key_files import create_file_exclusively
+from dfsha.common.key_files import create_file_exclusively
 
 SIGNING_ALGORITHM = "EdDSA"
 SESSION_TOKEN_TYPE = "session"          # token de login: identifica al usuario ante el superpeer

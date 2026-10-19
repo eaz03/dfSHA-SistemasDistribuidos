@@ -26,8 +26,8 @@ import sys
 import threading
 import uuid
 
-from dict_registry import block_from_dict, block_to_dict
-from registry import Registry
+from dfsha.superpeer.dict_registry import block_from_dict, block_to_dict
+from dfsha.superpeer.registry import Registry
 
 LOG_FILE_NAME = "registry.log"
 SNAPSHOT_FILE_NAME = "registry.snapshot.json"

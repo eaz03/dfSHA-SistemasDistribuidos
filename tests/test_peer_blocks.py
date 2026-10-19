@@ -3,7 +3,7 @@ Prueba de la API de bloques de los peers (WriteBlock, ReadBlock, DeleteBlock), h
 con cada peer: sin FUSE y sin pasar por el registro del superpeer.
 
 Se ejecuta dentro de un contenedor (necesita grpc y el código generado), desde WSL:
-  docker compose exec sp1 python test_peer_blocks.py
+  docker compose exec client python -m tests.test_peer_blocks
 Opciones: --peers peer1:7100,peer2:7100,peer3:7100   --superpeer localhost:7000
 Al terminar borra los bloques que escribió.
 """
@@ -18,11 +18,11 @@ import uuid
 
 import grpc
 
-import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
-from auth_client import authenticated_superpeer_stub, credentials_from_environment
-from tls import secure_channel
-from errors import errno_from_rpc_error
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.proto import dfsha_pb2_grpc as rpc
+from dfsha.client.auth_client import authenticated_superpeer_stub, credentials_from_environment
+from dfsha.common.tls import secure_channel
+from dfsha.common.errors import errno_from_rpc_error
 
 BLOCK_SIZE_BYTES = 1024 * 1024
 RPC_TIMEOUT_SECONDS = 5

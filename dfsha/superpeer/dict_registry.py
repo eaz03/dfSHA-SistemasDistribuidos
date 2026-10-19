@@ -21,8 +21,8 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from errors import FileSystemError
-from registry import BlockInfo, EntryInfo, Registry
+from dfsha.common.errors import FileSystemError
+from dfsha.superpeer.registry import BlockInfo, EntryInfo, Registry
 
 DEFAULT_BLOCK_SIZE = 1024 * 1024     # 1 MiB: en desarrollo, para que hasta un archivo chico se parta en bloques
 DEFAULT_REPLICATION_FACTOR = 2       # cada bloque en 2 peers distintos: aguanta la caída de uno

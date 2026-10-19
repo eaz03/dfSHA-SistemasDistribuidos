@@ -13,10 +13,10 @@ import threading
 
 import grpc
 
-import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
-from auth_interceptor import bearer_metadata
-from tls import secure_channel
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.proto import dfsha_pb2_grpc as rpc
+from dfsha.common.auth_interceptor import bearer_metadata
+from dfsha.common.tls import secure_channel
 
 DEFAULT_CLIENT_TLS_DIR = "certs/client"
 

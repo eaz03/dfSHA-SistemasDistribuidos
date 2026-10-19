@@ -5,17 +5,17 @@ import time
 
 import grpc
 
-import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
-from auth_interceptor import AuthenticationInterceptor, RoleInterceptor, current_user
-from auth_tokens import TokenIssuer, TokenVerifier, load_or_create_signing_key
-from errors import FileSystemError, translate_file_system_errors_to_grpc
-from dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
-from json_user_store import JsonUserStore
-from peer_tracker import PeerTracker
-from persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
-from registry import BlockInfo
-from tls import secure_channel, server_credentials
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.proto import dfsha_pb2_grpc as rpc
+from dfsha.common.auth_interceptor import AuthenticationInterceptor, RoleInterceptor, current_user
+from dfsha.common.auth_tokens import TokenIssuer, TokenVerifier, load_or_create_signing_key
+from dfsha.common.errors import FileSystemError, translate_file_system_errors_to_grpc
+from dfsha.superpeer.dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
+from dfsha.superpeer.json_user_store import JsonUserStore
+from dfsha.superpeer.peer_tracker import PeerTracker
+from dfsha.superpeer.persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
+from dfsha.superpeer.registry import BlockInfo
+from dfsha.common.tls import secure_channel, server_credentials
 
 DEMO_USER = "demo"                  # dueño de las entradas de ejemplo de --demo (crear su cuenta con manage_users.py)
 # RPCs que no piden token: Login (es el que lo entrega) y los de los peers, que no son usuarios.

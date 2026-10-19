@@ -4,7 +4,7 @@ haciendo a mano lo que después hará el cliente: pedir el plan, subir cada bloq
 hacer commit y volver a leer el archivo con las ubicaciones que entrega el superpeer.
 
 Se ejecuta dentro de un contenedor, desde WSL, con los peers levantados:
-  docker compose exec client python test_superpeer_blocks.py
+  docker compose exec client python -m tests.test_superpeer_blocks
 Al terminar borra los archivos y los bloques que creó.
 """
 
@@ -17,11 +17,11 @@ import uuid
 
 import grpc
 
-import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
-from auth_client import authenticated_superpeer_stub, credentials_from_environment
-from tls import secure_channel
-from errors import errno_from_rpc_error
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.proto import dfsha_pb2_grpc as rpc
+from dfsha.client.auth_client import authenticated_superpeer_stub, credentials_from_environment
+from dfsha.common.tls import secure_channel
+from dfsha.common.errors import errno_from_rpc_error
 
 MEBIBYTE = 1024 * 1024
 RPC_TIMEOUT_SECONDS = 5

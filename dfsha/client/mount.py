@@ -11,8 +11,8 @@ import tempfile
 import grpc
 from fuse import FUSE, Operations, FuseOSError
 
-from client import DFSClient
-from errors import errno_from_rpc_error
+from dfsha.client.client import DFSClient
+from dfsha.common.errors import errno_from_rpc_error
 
 
 class DFShaFS(Operations):
@@ -138,7 +138,7 @@ class DFShaFS(Operations):
 
 def main():
     if len(sys.argv) != 3:
-        sys.exit("usage: python mount.py <superpeer host:port> <mountpoint>")
+        sys.exit("usage: python -m dfsha.client.mount <superpeer host:port> <mountpoint>")
 
     # Credenciales por variables de entorno: en Docker Compose vienen del archivo .env (fuera de git)
     username = os.environ.get("DFSHA_USER")

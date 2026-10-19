@@ -4,10 +4,10 @@ Certificados de DFSha: una autoridad certificadora (CA) propia y un certificado 
 Todos los nodos confían en la CA, no en una lista de nodos: un peer nuevo solo necesita que se le
 emita un certificado, sin tocar ni reiniciar a los demás.
 
-    python make_certs.py init                                # una sola vez: crea la CA
-    python make_certs.py issue peer peer2 --san peer2        # un nodo nuevo
-    python make_certs.py issue peer peer3 --san 10.8.0.7     # en una VM, con su IP de la VPN
-    python make_certs.py dev                                 # CA + los nodos del docker-compose
+    python -m tools.make_certs init                                # una sola vez: crea la CA
+    python -m tools.make_certs issue peer peer2 --san peer2        # un nodo nuevo
+    python -m tools.make_certs issue peer peer3 --san 10.8.0.7     # en una VM, con su IP de la VPN
+    python -m tools.make_certs dev                                 # CA + los nodos del docker-compose
 
 Cada nodo queda en certs/<nombre>/ con node.key, node.crt y ca.crt: es lo único que hay que
 copiarle. ca.key (la clave de la CA) nunca sale de la máquina donde se emiten los certificados:
@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from key_files import create_file_exclusively
+from dfsha.common.key_files import create_file_exclusively
 
 CERTS_DIRECTORY = "certs"
 ROLES = ("superpeer", "peer", "client")

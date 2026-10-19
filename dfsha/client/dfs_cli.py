@@ -3,12 +3,12 @@ Herramienta de línea de comandos para DFSha, sin FUSE: usa client.py para habla
 con el superpeer y con los peers.
 
 TEMPORAL: sirve para tener archivos con contenido mientras el mount no escribe.
-Se borra cuando el mount escriba (ver PLAN.md).
+Se borra cuando el mount escriba (ver docs/PLAN.md).
 
 Uso, desde WSL (dentro de los contenedores, la carpeta del proyecto se ve en /app):
-  docker compose exec sp1 python dfs_cli.py put /app/README.md /readme.md     subir un archivo local
-  docker compose exec sp1 python dfs_cli.py get /readme.md /tmp/readme.md     bajar un archivo
-  docker compose exec sp1 python dfs_cli.py blocks /readme.md                 ver sus bloques y réplicas
+  docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md     subir un archivo local
+  docker compose exec client python -m dfsha.client.dfs_cli get /readme.md /tmp/readme.md     bajar un archivo
+  docker compose exec client python -m dfsha.client.dfs_cli blocks /readme.md                 ver sus bloques y réplicas
 Opción: --superpeer sp1:7000 (varias direcciones separadas por comas).
 """
 
@@ -18,10 +18,10 @@ import sys
 
 import grpc
 
-from auth_client import credentials_from_environment
+from dfsha.client.auth_client import credentials_from_environment
 
-from client import DFSClient
-from errors import FileSystemError, errno_from_rpc_error
+from dfsha.client.client import DFSClient
+from dfsha.common.errors import FileSystemError, errno_from_rpc_error
 
 MEBIBYTE = 1024 * 1024
 EXPECTED_REPLICAS = 2      # el factor de replicación del registro: avisar si un bloque quedó con menos
