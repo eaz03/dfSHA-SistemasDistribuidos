@@ -87,6 +87,7 @@ message PeerInfo {
 
 message RegisterPeerReply {
   double heartbeat_interval_seconds = 1;   // cada cuánto debe enviar Heartbeat (lo decide el superpeer)
+  bytes  token_public_key = 2;             // PEM: con ella el peer verifica los permisos de bloque (no puede fabricarlos)
 }
 
 message HeartbeatRequest {
@@ -115,11 +116,13 @@ message PeerList {
 
 message BlockRequest {
   string block_id = 1;           // 32 caracteres hexadecimales, generado por el registro
+  string access_token = 2;       // permiso de lectura que entregó el superpeer (ReadBlock); DeleteBlock no lo usa
 }
 
 message WriteBlockRequest {
   string block_id = 1;
   bytes  data = 2;               // hasta un bloque (1 MiB): cabe en el límite de 4 MB por mensaje de gRPC
+  string access_token = 3;       // permiso de escritura que entregó el superpeer en el plan
 }
 
 message BlockData {
@@ -137,6 +140,8 @@ message BlockLocation {
   string block_id = 1;
   int64  size = 2;
   repeated Replica replicas = 3; // GetBlockLocations: peers vivos primero
+  string access_token = 4;       // permiso firmado para este bloque: escritura en AllocateBlocks, lectura en
+                                 // GetBlockLocations. El cliente lo presenta al peer en WriteBlock/ReadBlock
 }
 
 message BlockList {

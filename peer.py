@@ -28,11 +28,12 @@ import grpc
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
 from auth_interceptor import RoleInterceptor
+from auth_tokens import InvalidTokenError, TokenVerifier, WrongBlockPermissionError, load_verification_key_from_pem
 from disk_block_storage import DiskBlockStorage
 from encrypted_block_storage import EncryptedBlockStorage
 from errors import translate_file_system_errors_to_grpc
 from key_files import load_or_create_secret_key
-from tls import secure_channel, server_credentials
+from tls import caller_role, secure_channel, server_credentials
 
 REGISTER_TIMEOUT_SECONDS = 5.0      # mayor que el Ping que hace el superpeer durante el registro (2 s)
 HEARTBEAT_TIMEOUT_SECONDS = 2.0
@@ -56,11 +57,38 @@ class Peer(rpc.PeerServicer):
       block_id inválido   -> EINVAL -> INVALID_ARGUMENT
       bloque inexistente  -> ENOENT -> NOT_FOUND
       disco lleno         -> ENOSPC -> RESOURCE_EXHAUSTED
+    Además, WriteBlock y ReadBlock exigen un permiso de bloque firmado por el superpeer (ver _authorize):
+    el peer no sabe a qué usuario pertenece cada bloque, el superpeer sí.
     """
 
     def __init__(self, peer_id, block_storage):
         self.peer_id = peer_id
         self.block_storage = block_storage       # cualquier implementación de block_storage.BlockStorage
+        self.token_verifier = None               # llega con la clave pública del superpeer al registrarse
+
+    def use_superpeer_public_key(self, public_key_pem):
+        """La guarda SuperpeerMembership cada vez que el peer se registra (también si el superpeer cambió de clave)."""
+        self.token_verifier = TokenVerifier(load_verification_key_from_pem(public_key_pem))
+
+    def _authorize(self, request, operation, context):
+        """
+        Termina la llamada si quien llama no puede hacer operation sobre request.block_id.
+        Un superpeer (según su certificado) no necesita permiso: es el plano de control de confianza.
+        Un cliente debe presentar el permiso que le entregó el superpeer para ese bloque y esa operación.
+        """
+        if caller_role(context) == "superpeer":
+            return
+        token_verifier = self.token_verifier
+        if token_verifier is None:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "peer not registered yet: cannot check block permissions")
+        if not request.access_token:
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing block permission: get it from the superpeer")
+        try:
+            token_verifier.verify_block_token(request.access_token, request.block_id, operation)
+        except WrongBlockPermissionError as error:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, str(error))       # válido, pero para otra cosa
+        except InvalidTokenError as error:
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, str(error))        # falso, vencido o de otro tipo
 
     def Ping(self, request, context):
         """RPC: responde para demostrar que este peer atiende en esta dirección. Lo llama el superpeer."""
@@ -70,13 +98,16 @@ class Peer(rpc.PeerServicer):
         """
         RPC: guarda un bloque. Lo llama el cliente al subir un archivo, una vez por réplica.
         Si el bloque ya existía lo reemplaza: es un reintento del cliente (los IDs nunca se reutilizan).
+        El permiso de escritura impide que un cliente reemplace un bloque que no es suyo.
         """
+        self._authorize(request, "write", context)
         with translate_file_system_errors_to_grpc(context):
             self.block_storage.write_block(request.block_id, request.data)
         return pb.Empty()
 
     def ReadBlock(self, request, context):
-        """RPC: devuelve los bytes de un bloque. Lo llama el cliente al leer un archivo."""
+        """RPC: devuelve los bytes de un bloque. Lo llama el cliente al leer un archivo, con su permiso de lectura."""
+        self._authorize(request, "read", context)
         with translate_file_system_errors_to_grpc(context):
             data = self.block_storage.read_block(request.block_id)
         return pb.BlockData(data=data)
@@ -100,7 +131,7 @@ class SuperpeerMembership:
     Todo corre en el hilo que llama a run(); stop_event lo detiene.
     """
 
-    def __init__(self, superpeer_address, peer_info, data_directory, stop_event, tls_dir):
+    def __init__(self, superpeer_address, peer_info, data_directory, stop_event, tls_dir, on_superpeer_public_key):
         self.superpeer_address = superpeer_address
         self.peer_info = peer_info                   # pb.PeerInfo: id, dirección anunciada, capacidad
         self.data_directory = data_directory
@@ -108,6 +139,7 @@ class SuperpeerMembership:
         self.channel = secure_channel(superpeer_address, tls_dir)   # mTLS; gRPC reconecta solo si el superpeer se reinicia
         self.superpeer_stub = rpc.SuperpeerStub(self.channel)
         self.heartbeat_interval_seconds = None       # lo fija el superpeer en la respuesta a RegisterPeer
+        self.on_superpeer_public_key = on_superpeer_public_key   # recibe la clave pública que llega al registrarse
         self.superpeer_reachable = True              # solo para no repetir el mismo mensaje en cada heartbeat fallido
 
     def run(self):
@@ -138,6 +170,7 @@ class SuperpeerMembership:
             try:
                 register_reply = self.superpeer_stub.RegisterPeer(self.peer_info, timeout=REGISTER_TIMEOUT_SECONDS)
                 self.heartbeat_interval_seconds = register_reply.heartbeat_interval_seconds
+                self.on_superpeer_public_key(register_reply.token_public_key)
                 print(f"registered in superpeer {self.superpeer_address} as {self.peer_info.address}, "
                       f"heartbeat every {self.heartbeat_interval_seconds:g} s")
                 return True
@@ -238,7 +271,8 @@ def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory
     #    Con bloques más grandes habría que subir ese límite o enviar el bloque en streaming.
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16),
                          interceptors=[RoleInterceptor(SUPERPEER_ONLY_METHODS)])
-    rpc.add_PeerServicer_to_server(Peer(peer_id, block_storage), server)
+    peer_servicer = Peer(peer_id, block_storage)
+    rpc.add_PeerServicer_to_server(peer_servicer, server)
     server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS
     server.start()
     announced_address = f"{host}:{port}"
@@ -251,7 +285,8 @@ def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory
 
     # 3. Registro y heartbeats en este hilo, hasta la orden de apagar.
     peer_info = pb.PeerInfo(peer_id=peer_id, address=announced_address, capacity_bytes=capacity_bytes)
-    membership = SuperpeerMembership(superpeer_address, peer_info, data_directory, stop_event, tls_dir)
+    membership = SuperpeerMembership(superpeer_address, peer_info, data_directory, stop_event, tls_dir,
+                                     on_superpeer_public_key=peer_servicer.use_superpeer_public_key)
     try:
         membership.run()
     finally:

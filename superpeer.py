@@ -146,7 +146,10 @@ class Superpeer(rpc.SuperpeerServicer):
         self.peer_tracker.register(peer_id, address, capacity_bytes)
         print(f"peer registered: {peer_id} at {address}, capacity {capacity_bytes} bytes")
         heartbeat_interval_seconds = self.peer_tracker.heartbeat_interval_seconds
-        return pb.RegisterPeerReply(heartbeat_interval_seconds=heartbeat_interval_seconds)
+        # Con la clave pública el peer verifica los permisos de bloque que firma este superpeer.
+        # Le llega auténtica porque el peer habla con el superpeer por mTLS y verifica su certificado
+        return pb.RegisterPeerReply(heartbeat_interval_seconds=heartbeat_interval_seconds,
+                                    token_public_key=self.token_issuer.public_key_pem())
 
     def Heartbeat(self, request, context):
         """
@@ -184,7 +187,7 @@ class Superpeer(rpc.SuperpeerServicer):
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
             blocks = self.registry.get_block_locations(current_user(), path)
-        return self._block_list_reply(blocks)
+        return self._block_list_reply(blocks, "read")
 
     def AllocateBlocks(self, request, context):
         """
@@ -194,7 +197,7 @@ class Superpeer(rpc.SuperpeerServicer):
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
             blocks = self.registry.allocate_blocks(current_user(), path, request.size)
-        return self._block_list_reply(blocks)
+        return self._block_list_reply(blocks, "write")
 
     def CommitFile(self, request, context):
         """
@@ -219,12 +222,18 @@ class Superpeer(rpc.SuperpeerServicer):
 
     # ---------- Ayudantes de bloques ----------
 
-    def _block_list_reply(self, blocks):
-        """Convierte una lista de BlockInfo del registro en la respuesta pb.BlockList."""
+    def _block_list_reply(self, blocks, operation):
+        """
+        Convierte una lista de BlockInfo del registro en la respuesta pb.BlockList.
+        Cada bloque lleva un permiso firmado para operation ("read" o "write") a nombre del usuario:
+        sin él, los peers no dejan leer ni escribir ese bloque (el peer no sabe de quién es cada bloque).
+        """
         block_locations = []
         for block in blocks:
             replicas = self._replicas_alive_first(block.peer_ids)
-            block_location = pb.BlockLocation(block_id=block.block_id, size=block.size, replicas=replicas)
+            access_token = self.token_issuer.issue_block_token(current_user(), block.block_id, operation)
+            block_location = pb.BlockLocation(block_id=block.block_id, size=block.size, replicas=replicas,
+                                              access_token=access_token)
             block_locations.append(block_location)
         return pb.BlockList(blocks=block_locations, block_size=BLOCK_SIZE_BYTES)
 
