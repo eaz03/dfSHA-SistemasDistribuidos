@@ -62,6 +62,13 @@ class DiskBlockStorage(BlockStorage):
                 os.fsync(temporary_file.fileno())        # del sistema operativo al disco
             # Mismo directorio que el temporal, así que el rename es atómico
             os.replace(temporary_path, final_path)      # sobreescribe si ya existía: es un reintento
+        except OSError as os_error:
+            # Disco lleno: es un error esperable, no un bug. Como FileSystemError llega al cliente
+            # como ENOSPC (RESOURCE_EXHAUSTED); como OSError llegaría como UNKNOWN.
+            # Cualquier otro OSError (permisos, disco dañado) sí es un problema del peer: se deja pasar.
+            if os_error.errno == errno.ENOSPC:
+                raise FileSystemError(errno.ENOSPC, block_id) from None
+            raise
         finally:
             # Si algo falló (disco lleno, permisos...), no dejar el temporal tirado.
             # Si todo salió bien, el replace ya lo convirtió en el bloque y no queda nada que borrar.

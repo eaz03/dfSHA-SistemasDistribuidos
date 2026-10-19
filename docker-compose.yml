@@ -1,27 +1,50 @@
 services:
   sp1:
     build: .
-    command: python superpeer.py --id sp1 --port 7000 --demo
-    # /data/registry: log y snapshot del registro, sobreviven a reinicios y a docker compose down
-    volumes: [".:/app", "sp1-data:/data"]
+    command: python superpeer.py --id sp1 --port 7000 --demo --tls-dir certs/sp1
+    # /data: usuarios (users.json) y registro persistente (registry/: log + snapshot).
+    # /keys: clave que firma los tokens, aparte de los datos
+    volumes: [".:/app", "sp1-data:/data", "sp1-keys:/keys"]
 
+  # Peers: mismo código, cada uno con su id, su nombre en la red, su certificado (--tls-dir),
+  # su volumen de bloques (/data) y, aparte, el de la clave que cifra esos bloques (/keys)
   peer1:
     build: .
-    command: python peer.py --id peer1 --host peer1 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data
-    volumes: [".:/app", "peer1-data:/data"]
+    command: python peer.py --id peer1 --host peer1 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer1 --block-key /keys/blocks.key
+    volumes: [".:/app", "peer1-data:/data", "peer1-keys:/keys"]
+    depends_on: [sp1]
+
+  peer2:
+    build: .
+    command: python peer.py --id peer2 --host peer2 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer2 --block-key /keys/blocks.key
+    volumes: [".:/app", "peer2-data:/data", "peer2-keys:/keys"]
+    depends_on: [sp1]
+
+  peer3:
+    build: .
+    command: python peer.py --id peer3 --host peer3 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer3 --block-key /keys/blocks.key
+    volumes: [".:/app", "peer3-data:/data", "peer3-keys:/keys"]
     depends_on: [sp1]
 
   client:
     build: .
     command: python mount.py sp1:7000 /mnt/dfsha
     volumes: [".:/app"]
-    environment: ["DFSHA_DEBUG=1"]
+    # Credenciales del montaje: se leen del archivo .env (fuera de git; ver .env.example)
+    environment: ["DFSHA_DEBUG=1", "DFSHA_USER=${DFSHA_USER}", "DFSHA_PASSWORD=${DFSHA_PASSWORD}",
+                  "DFSHA_TLS_DIR=certs/client"]
     devices: ["/dev/fuse"]
     cap_add: ["SYS_ADMIN"]
     security_opt: ["apparmor:unconfined"]
     depends_on: [sp1]
     restart: on-failure
 
-volumes:
-  peer1-data:     # carpeta de bloques de peer1: sobrevive a docker compose down, se borra con down -v
-  sp1-data:       # registro persistente del superpeer (log + snapshot)
+volumes:           # sobreviven a docker compose down, se borran con down -v
+  sp1-data:        # usuarios y registro persistente (log + snapshot) del superpeer
+  sp1-keys:        # clave privada de los tokens: separada de los datos
+  peer1-data:      # bloques (cifrados) de cada peer
+  peer2-data:
+  peer3-data:
+  peer1-keys:      # clave de cifrado de los bloques de cada peer: separada de los bloques
+  peer2-keys:
+  peer3-keys:

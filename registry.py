@@ -39,10 +39,13 @@ class BlockInfo:
     Un bloque de un archivo: un pedazo de hasta block_size bytes, guardado en varios peers.
     También es una copia de solo lectura, como EntryInfo.
     """
-    block_id: str    # único (uuid4): cada versión de un archivo usa bloques nuevos, nunca reutiliza IDs
-    size: int        # bytes de este bloque; solo el último del archivo puede ser más chico
-    peers: tuple     # peers con una réplica, p. ej. ("peer1:7001", "peer2:7002").
-                     # tuple y no list: frozen impide reasignar el campo, pero una lista se podría modificar
+    block_id: str     # único (uuid4): cada versión de un archivo usa bloques nuevos, nunca reutiliza IDs
+    size: int         # bytes de este bloque; solo el último del archivo puede ser más chico
+    peer_ids: tuple   # peer_id de los peers con una réplica, p. ej. ("peer1", "peer2").
+                      # IDs y no direcciones: la dirección de un peer puede cambiar (reinicio, VPN),
+                      # su ID no. El superpeer traduce ID -> dirección con su tabla de peers al responder.
+                      # tuple y no list: frozen impide reasignar el campo, pero una lista se podría modificar.
+                      # Puede tener menos de replication_factor IDs si había pocos peers (subreplicado).
 
 
 class Registry(ABC):
@@ -127,11 +130,13 @@ class Registry(ABC):
     def allocate_blocks(self, user, path, file_size):
         """
         Planifica dónde guardar una versión nueva de path, de file_size bytes: la parte en bloques
-        y le asigna a cada uno replication_factor peers distintos.
+        y le asigna a cada uno replication_factor peers distintos. Si hay menos peers disponibles
+        que replication_factor, usa los que haya (cada bloque queda en todos ellos, subreplicado);
+        la re-replicación completará las copias cuando haya más peers.
         Devuelve una lista de BlockInfo, en orden (vacía si file_size es 0).
         No modifica el archivo, por eso no recibe 'now': no hay nada que repetir desde un log.
         Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si file_size < 0;
-                 ENOSPC si hay menos peers que el factor de replicación.
+                 ENOSPC si no hay ningún peer disponible y file_size > 0.
         """
 
     @abstractmethod
@@ -139,12 +144,16 @@ class Registry(ABC):
         """
         Hace visible la versión nueva de path, de size bytes, formada por blocks (en orden),
         cuando el cliente ya subió todos esos bloques a sus peers.
-        Recibe los BlockInfo completos y 'now' para que se pueda repetir igual desde un log.
+        En cada bloque, peer_ids son los peers donde el cliente SÍ logró escribirlo: puede ser
+        solo una parte de los asignados (si un peer se cayó durante la subida), pero al menos uno.
+        peer_ids puede llegar como lista (así llega de protobuf): el registro lo guarda como tuple.
+        Recibe los BlockInfo y 'now' para que se pueda repetir igual desde un log.
         Devuelve los BlockInfo de la versión anterior, ya obsoletos: el registro no habla con
         los peers, así que borrarlos le toca a quien llama.
         Errores: ENOENT si path no existe; EISDIR si es un directorio; EINVAL si size < 0,
-                 si algún bloque no es exactamente uno asignado por allocate_blocks a ese
-                 usuario y path, si un bloque se repite, si algún bloque que no es el último
+                 si algún bloque no fue asignado por allocate_blocks a ese usuario y path o
+                 cambió de tamaño, si un bloque se repite, si algún bloque no tiene peers, repite
+                 un peer o tiene uno que no le fue asignado, si algún bloque que no es el último
                  no mide block_size, o si los tamaños de los bloques no suman size.
         """
 
@@ -152,7 +161,7 @@ class Registry(ABC):
     def get_block_locations(self, user, path):
         """
         Devuelve los BlockInfo de la versión actual de path, en orden (vacía si mide 0 bytes):
-        qué bloques lo forman y en qué peers está cada uno.
+        qué bloques lo forman y en qué peers (peer_id) está cada uno.
         Errores: ENOENT si path no existe; EISDIR si es un directorio.
         """
 

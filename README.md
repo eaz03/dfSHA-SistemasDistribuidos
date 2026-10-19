@@ -5,6 +5,7 @@ Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 
 > **Estado: preliminar.** Funciona el espacio de nombres completo a través de un montaje FUSE:
 > `ls`, `cd`, `stat`, `find`, `mkdir`, `rmdir`, `rm`, `mv`, `touch`.
+> Los peers se registran en el superpeer y envían heartbeats; el superpeer detecta cuándo caen.
 > La lectura y escritura del contenido de los archivos (bloques en los peers) está en desarrollo.
 
 ## Componentes
@@ -13,12 +14,21 @@ Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 |---|---|
 | `mount.py` | Cliente. Monta DFSha como una carpeta común (FUSE): cualquier programa (`ls`, `cd`, `mkdir`...) la usa sin saber que es remota |
 | `client.py` | `DFSClient`: envía las operaciones al superpeer por gRPC |
-| `superpeer.py` | Servidor gRPC del superpeer: recibe cada operación y la aplica al registro de metadatos |
+| `superpeer.py` | Servidor gRPC del superpeer: recibe cada operación y la aplica al registro de metadatos; registra a los peers |
+| `peer_tracker.py` | Tabla de peers del superpeer: dirección, espacio libre, vivo o muerto según sus heartbeats |
+| `peer.py` | Peer: se registra en el superpeer, envía heartbeats y (próximamente) guarda bloques |
 | `registry.py` | Contrato (interfaz) del registro de metadatos |
 | `dict_registry.py` | Implementación actual del registro: diccionarios en memoria |
+| `persistent_registry.py` | Envuelve al registro y lo guarda en disco: log de operaciones (con `fsync`) + snapshot; al arrancar lo reconstruye |
 | `errors.py` | Errores de sistema de archivos y su traducción entre capas (registro, red, kernel) |
-| `dfsha.proto` | Contrato de comunicación gRPC entre cliente y superpeer |
-| `Dockerfile`, `docker-compose.yml` | Imagen y contenedores: `sp1` (superpeer) y `client` (montaje) |
+| `dfsha.proto` | Contrato de comunicación gRPC: servicios `Superpeer` y `Peer` |
+| `peers_status.py` | Muestra la tabla de peers del superpeer |
+| `test_peers.py` | Prueba automática de la conexión peer ↔ superpeer |
+| `block_storage.py`, `disk_block_storage.py` | Almacenamiento de bloques del peer: interfaz e implementación en disco |
+| `test_peer_blocks.py` | Prueba de la API de bloques de los peers (escribir, leer, borrar) |
+| `test_superpeer_blocks.py` | Prueba de plan, commit y ubicaciones de bloques en el superpeer (sube y relee un archivo a mano) |
+| `dfs_cli.py` | Temporal: subir (`put`), bajar (`get`) y ver los bloques (`blocks`) de un archivo sin FUSE, mientras el mount no escribe |
+| `Dockerfile`, `docker-compose.yml` | Imagen y contenedores: `sp1` (superpeer), `peer1`..`peer3` (peers) y `client` (montaje) |
 
 Flujo de una operación, por ejemplo `ls /mnt/dfsha/docs`:
 
@@ -44,13 +54,23 @@ docker compose build
 #    No está en el repositorio: se genera a partir de dfsha.proto.
 docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha.proto
 
-# 3. Arrancar el superpeer y el cliente
+# 3. Generar los certificados TLS: una CA propia y uno por nodo (sp1, peer1, client).
+#    Toda comunicación va cifrada y con certificado en ambas puntas (mTLS). certs/ no va a git.
+docker compose run --rm sp1 python make_certs.py dev
+
+# 4. Crear un usuario (pide la contraseña sin mostrarla) y darle sus credenciales al montaje.
+#    --demo crea archivos de ejemplo para el usuario "demo".
+docker compose run --rm sp1 python manage_users.py add demo
+cp .env.example .env                   # y poner en .env la contraseña elegida (.env no va a git)
+
+# 5. Arrancar el superpeer, el peer y el cliente
 docker compose up -d
 
-# 4. Comprobar que arrancaron
-docker compose ps                      # sp1 y client en estado "Up"
+# 6. Comprobar que arrancaron
+docker compose ps                      # sp1, peer1, peer2, peer3 y client en estado "Up"
 docker compose logs sp1                # superpeer sp1 listening on :7000 (demo data)
-docker compose logs client             # connected to: sp1:7000
+                                       # peer registered: peer1 at peer1:7100, ...
+docker compose logs client             # connected to: sp1:7000  (o "login failed": revisar .env)
 ```
 
 ## Uso
@@ -74,6 +94,55 @@ rm -r proyectos
 Para detener todo: `docker compose down`. El registro del superpeer es persistente (log de operaciones +
 snapshot en el volumen `sp1-data`): sobrevive a reinicios y a `down`; `docker compose down -v` lo borra.
 
+### Usuarios
+
+Cada usuario tiene su propio espacio de nombres: solo ve sus archivos.
+
+```bash
+docker compose run --rm sp1 python manage_users.py add sofi      # crear
+docker compose run --rm sp1 python manage_users.py list          # listar
+docker compose run --rm sp1 python manage_users.py remove sofi   # borrar
+
+# Montar como otro usuario sin editar .env:
+DFSHA_USER=sofi DFSHA_PASSWORD=... docker compose up -d client
+```
+
+Los usuarios (`/data/users.json`, solo hashes de las contraseñas) y la clave que firma los tokens
+(`/keys/token.key`) viven en volúmenes de `sp1`; `docker compose down -v` los borra.
+
+### Certificados
+
+Todos los nodos confían en la CA de `certs/`, no en una lista de nodos. Para agregar un nodo basta
+con emitirle un certificado (los demás no cambian ni se reinician) y arrancarlo con `--tls-dir certs/<nombre>`:
+
+```bash
+docker compose run --rm sp1 python make_certs.py issue peer peer2 --san peer2
+docker compose run --rm sp1 python make_certs.py issue peer peer3 --san 10.8.0.7   # en una VM: su IP de la VPN
+```
+
+El rol del certificado (`superpeer`, `peer`, `client`) limita qué puede hacer cada nodo: p. ej. solo
+un `peer` puede registrarse en el superpeer y solo un `superpeer` puede dar órdenes a un peer.
+Los certificados de los nodos duran 90 días y la CA un año. En una VM se copian solo
+`node.key`, `node.crt` y `ca.crt` de su carpeta: `ca.key` nunca sale de donde se emiten.
+
+Para desplegar en máquinas virtuales (CA, certificados por IP de la VPN, usuarios, renovación y
+qué hacer si algo se compromete), seguir [DESPLIEGUE.md](DESPLIEGUE.md).
+
+## Peers
+
+```bash
+# Las herramientas hablan con el superpeer como un cliente más (login + certificado): se ejecutan
+# en el contenedor client, que tiene las credenciales del .env y el certificado de cliente
+docker compose exec client python peers_status.py  # tabla de peers: dirección, espacio libre, vivo o muerto
+docker compose logs -f peer1                        # registro, reintentos y re-registros del peer
+python3 test_peers.py                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
+docker compose exec client python test_peer_blocks.py  # API de bloques de peer1, peer2 y peer3 (~5 s)
+docker compose exec client python test_superpeer_blocks.py  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
+docker compose exec client python dfs_cli.py put /app/README.md /readme.md   # subir (en /app está la carpeta del proyecto)
+docker compose exec client python dfs_cli.py blocks /readme.md               # bloques y en qué peers está cada uno
+docker compose exec client python dfs_cli.py get /readme.md /tmp/readme.md   # bajar
+```
+
 ## Desarrollo
 
 | Si se modifica... | Hay que ejecutar |
@@ -93,6 +162,7 @@ Opciones útiles:
 |---|---|
 | `permission denied ... docker.sock` | El usuario no está en el grupo `docker`, o falta abrir una terminal nueva después de agregarlo |
 | `ModuleNotFoundError: dfsha_pb2` | Falta el paso 2 (generar el código gRPC) |
+| `FileNotFoundError: .../node.key` al arrancar | Falta el paso 3 (generar los certificados) |
 | El cliente se reinicia con `no superpeer reachable` | `sp1` no arrancó: revisar `docker compose logs sp1` |
 | `fuse: device not found` u `Operation not permitted` al montar | Faltan `devices`, `cap_add` o `security_opt` del servicio `client` en `docker-compose.yml` |
 | `Transport endpoint is not connected` | `mount.py` terminó con error: `docker compose restart client` |
@@ -101,5 +171,5 @@ Opciones útiles:
 ## Limitaciones actuales
 
 - Todavía no se guarda contenido: `cat`, `cp` y escribir en un archivo fallan. Los archivos existen solo como entradas del registro, con tamaño 0.
-- Un solo superpeer y un usuario fijo de prueba (`demo`): sin autenticación ni cifrado todavía.
+- Un solo superpeer. Hay login con usuario/contraseña, tokens y mTLS en todos los canales, y los peers guardan los bloques cifrados (AES-256-GCM).
 - El registro se guarda en disco en un solo superpeer: todavía no se replica a otros superpeers.

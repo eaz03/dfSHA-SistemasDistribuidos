@@ -103,6 +103,17 @@ class PeerTracker:
                 snapshots.append(snapshot)
             return snapshots
 
+    def peer_snapshot(self, peer_id):
+        """
+        El PeerSnapshot de un peer, vivo o muerto, o None si no está en la tabla.
+        Lo usará GetBlockLocations para traducir los peer_id del registro a direcciones.
+        """
+        with self._lock:
+            record = self._peers.get(peer_id)
+            if record is None:
+                return None
+            return self._snapshot(peer_id, record, self._clock())
+
     def alive_peers(self):
         """Solo los peers vivos. Lo usará la elección de peers para bloques nuevos (pasos 3 y 4)."""
         living_peers = []
@@ -110,6 +121,17 @@ class PeerTracker:
             if peer.alive:
                 living_peers.append(peer)
         return living_peers
+
+    def alive_peer_ids_with_free_bytes(self, minimum_free_bytes):
+        """
+        peer_id de los peers vivos con al menos minimum_free_bytes libres, ordenados por peer_id.
+        El registro elige entre estos dónde poner cada bloque nuevo (un peer lleno no recibe más).
+        """
+        peer_ids = []
+        for peer in self.alive_peers():
+            if peer.free_bytes >= minimum_free_bytes:
+                peer_ids.append(peer.peer_id)
+        return peer_ids
 
     # ---------- Interno ----------
 
