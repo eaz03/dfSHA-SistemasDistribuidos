@@ -3,6 +3,8 @@
 Referencia técnica de la arquitectura de DFSha: qué hace cada componente, cómo se comunican y por
 qué se diseñó así. El informe técnico resume este documento y remite aquí para los detalles.
 La especificación exacta de la API es [`dfsha/proto/dfsha.proto`](../dfsha/proto/dfsha.proto).
+Los diagramas de la arquitectura y de los flujos principales están en la
+[wiki del proyecto](https://github.com/eaz03/dfSHA-SistemasDistribuidos/wiki/Arquitectura).
 
 ## 1. Vista general
 
