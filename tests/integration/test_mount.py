@@ -2,7 +2,7 @@
 Prueba del montaje FUSE (hito 7): lectura y escritura con comandos comunes de Linux sobre /mnt/dfsha.
 
 Se ejecuta en WSL (no dentro de un contenedor), desde cualquier carpeta, con el usuario del .env ya creado:
-  python3 -m tests.test_mount
+  python3 -m tests.integration.test_mount
 Solo usa la biblioteca estándar de Python. Los comandos corren dentro del contenedor client (el que tiene
 el montaje) con 'docker compose exec'; las fallas se simulan deteniendo peers con 'docker compose stop'.
 Trabaja en una carpeta propia de DFSha (/test-mount-<hora>), que borra al terminar.

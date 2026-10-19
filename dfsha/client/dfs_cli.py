@@ -6,7 +6,7 @@ RESPALDO: el acceso normal a DFSha es el montaje FUSE (mount.py). Esta herramien
   - subir y bajar archivos si el montaje no está disponible o falla, y para distinguir si un
     problema es del montaje (FUSE) o del resto del sistema (superpeer, peers, red);
   - ver en qué peers quedó cada bloque de un archivo (blocks), p. ej. para mostrar las réplicas;
-  - las pruebas: tests/test_mount.py sube y baja archivos con ella para comprobar el contenido sin FUSE.
+  - las pruebas: tests/integration/test_mount.py sube y baja archivos con ella para comprobar el contenido sin FUSE.
 
 Uso, desde WSL (dentro de los contenedores, la carpeta del proyecto se ve en /app):
   docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md     subir un archivo local
