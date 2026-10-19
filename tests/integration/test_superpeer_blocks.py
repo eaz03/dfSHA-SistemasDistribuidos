@@ -4,7 +4,7 @@ haciendo a mano lo que después hará el cliente: pedir el plan, subir cada bloq
 hacer commit y volver a leer el archivo con las ubicaciones que entrega el superpeer.
 
 Se ejecuta dentro de un contenedor, desde WSL, con los peers levantados:
-  docker compose exec client python -m tests.test_superpeer_blocks
+  docker compose exec client python -m tests.integration.test_superpeer_blocks
 Al terminar borra los archivos y los bloques que creó.
 """
 

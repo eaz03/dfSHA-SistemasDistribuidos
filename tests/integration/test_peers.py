@@ -2,7 +2,7 @@
 Prueba del paso 1 (conexión peer <-> superpeer) sobre los contenedores de Docker Compose.
 
 Se ejecuta en WSL (no dentro de un contenedor), desde cualquier carpeta:
-  python3 -m tests.test_peers
+  python3 -m tests.integration.test_peers
 Solo usa la biblioteca estándar de Python: controla los contenedores con 'docker compose'
 y consulta la tabla de peers ejecutando peers_status.py dentro del contenedor client
 (que tiene las credenciales y el certificado de cliente, porque ListPeers pide token).
