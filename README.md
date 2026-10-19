@@ -5,6 +5,7 @@ Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 
 > **Estado: preliminar.** Funciona el espacio de nombres completo a través de un montaje FUSE:
 > `ls`, `cd`, `stat`, `find`, `mkdir`, `rmdir`, `rm`, `mv`, `touch`.
+> Los peers se registran en el superpeer y envían heartbeats; el superpeer detecta cuándo caen.
 > La lectura y escritura del contenido de los archivos (bloques en los peers) está en desarrollo.
 
 ## Componentes
@@ -13,12 +14,20 @@ Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 |---|---|
 | `mount.py` | Cliente. Monta DFSha como una carpeta común (FUSE): cualquier programa (`ls`, `cd`, `mkdir`...) la usa sin saber que es remota |
 | `client.py` | `DFSClient`: envía las operaciones al superpeer por gRPC |
-| `superpeer.py` | Servidor gRPC del superpeer: recibe cada operación y la aplica al registro de metadatos |
+| `superpeer.py` | Servidor gRPC del superpeer: recibe cada operación y la aplica al registro de metadatos; registra a los peers |
+| `peer_tracker.py` | Tabla de peers del superpeer: dirección, espacio libre, vivo o muerto según sus heartbeats |
+| `peer.py` | Peer: se registra en el superpeer, envía heartbeats y (próximamente) guarda bloques |
 | `registry.py` | Contrato (interfaz) del registro de metadatos |
 | `dict_registry.py` | Implementación actual del registro: diccionarios en memoria |
 | `errors.py` | Errores de sistema de archivos y su traducción entre capas (registro, red, kernel) |
-| `dfsha.proto` | Contrato de comunicación gRPC entre cliente y superpeer |
-| `Dockerfile`, `docker-compose.yml` | Imagen y contenedores: `sp1` (superpeer) y `client` (montaje) |
+| `dfsha.proto` | Contrato de comunicación gRPC: servicios `Superpeer` y `Peer` |
+| `peers_status.py` | Muestra la tabla de peers del superpeer |
+| `test_peers.py` | Prueba automática de la conexión peer ↔ superpeer |
+| `block_storage.py`, `disk_block_storage.py` | Almacenamiento de bloques del peer: interfaz e implementación en disco |
+| `test_peer_blocks.py` | Prueba de la API de bloques de los peers (escribir, leer, borrar) |
+| `test_superpeer_blocks.py` | Prueba de plan, commit y ubicaciones de bloques en el superpeer (sube y relee un archivo a mano) |
+| `dfs_cli.py` | Temporal: subir (`put`), bajar (`get`) y ver los bloques (`blocks`) de un archivo sin FUSE, mientras el mount no escribe |
+| `Dockerfile`, `docker-compose.yml` | Imagen y contenedores: `sp1` (superpeer), `peer1`..`peer3` (peers) y `client` (montaje) |
 
 Flujo de una operación, por ejemplo `ls /mnt/dfsha/docs`:
 
@@ -48,8 +57,9 @@ docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grp
 docker compose up -d
 
 # 4. Comprobar que arrancaron
-docker compose ps                      # sp1 y client en estado "Up"
+docker compose ps                      # sp1, peer1 y client en estado "Up"
 docker compose logs sp1                # superpeer sp1 listening on :7000 (demo data)
+                                       # peer registered: peer1 at peer1:7100, ...
 docker compose logs client             # connected to: sp1:7000
 ```
 
@@ -72,6 +82,19 @@ rm -r proyectos
 ```
 
 Para detener todo: `docker compose down`. El registro vive en memoria, así que se pierde al detener el superpeer.
+
+## Peers
+
+```bash
+docker compose exec sp1 python peers_status.py     # tabla de peers: dirección, espacio libre, vivo o muerto
+docker compose logs -f peer1                        # registro, reintentos y re-registros del peer
+python3 test_peers.py                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
+docker compose exec sp1 python test_peer_blocks.py  # API de bloques de peer1, peer2 y peer3 (~5 s)
+docker compose exec sp1 python test_superpeer_blocks.py  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
+docker compose exec sp1 python dfs_cli.py put /app/README.md /readme.md   # subir (en /app está la carpeta del proyecto)
+docker compose exec sp1 python dfs_cli.py blocks /readme.md               # bloques y en qué peers está cada uno
+docker compose exec sp1 python dfs_cli.py get /readme.md /tmp/readme.md   # bajar
+```
 
 ## Desarrollo
 

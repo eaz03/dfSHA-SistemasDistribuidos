@@ -1,5 +1,9 @@
 """
-Peer de DFSha: guarda bloques (paso 2) y se mantiene registrado en el superpeer.
+Peer de DFSha: guarda bloques y se mantiene registrado en el superpeer.
+
+Su API (servicio Peer en dfsha.proto): WriteBlock, ReadBlock y DeleteBlock por block_id, más Ping.
+No sabe a qué archivo pertenece cada bloque: eso solo lo sabe el registro del superpeer.
+Dónde y cómo se guardan los bytes lo decide una implementación de BlockStorage (hoy DiskBlockStorage).
 
 Al arrancar:
   1. Levanta su servidor gRPC (servicio Peer). Va primero porque el superpeer
@@ -23,6 +27,8 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
+from disk_block_storage import DiskBlockStorage     # la ÚNICA línea que elige dónde se guardan los bloques
+from errors import translate_file_system_errors_to_grpc
 
 REGISTER_TIMEOUT_SECONDS = 5.0      # mayor que el Ping que hace el superpeer durante el registro (2 s)
 HEARTBEAT_TIMEOUT_SECONDS = 2.0
@@ -36,15 +42,43 @@ BYTES_PER_MB = 1024 * 1024
 class Peer(rpc.PeerServicer):
     """
     Servidor gRPC del peer: la API que exponen los peers.
-    Por ahora solo Ping. En el paso 2: WriteBlock, ReadBlock y DeleteBlock sobre data_directory.
+    Mismo patrón que los handlers del superpeer: cada RPC llama a block_storage dentro de
+    translate_file_system_errors_to_grpc, que convierte un FileSystemError en un error gRPC con su errno:
+      block_id inválido   -> EINVAL -> INVALID_ARGUMENT
+      bloque inexistente  -> ENOENT -> NOT_FOUND
+      disco lleno         -> ENOSPC -> RESOURCE_EXHAUSTED
     """
 
-    def __init__(self, peer_id, data_directory):
+    def __init__(self, peer_id, block_storage):
         self.peer_id = peer_id
-        self.data_directory = data_directory     # carpeta donde vivirán los bloques
+        self.block_storage = block_storage       # cualquier implementación de block_storage.BlockStorage
 
     def Ping(self, request, context):
         """RPC: responde para demostrar que este peer atiende en esta dirección. Lo llama el superpeer."""
+        return pb.Empty()
+
+    def WriteBlock(self, request, context):
+        """
+        RPC: guarda un bloque. Lo llama el cliente al subir un archivo, una vez por réplica.
+        Si el bloque ya existía lo reemplaza: es un reintento del cliente (los IDs nunca se reutilizan).
+        """
+        with translate_file_system_errors_to_grpc(context):
+            self.block_storage.write_block(request.block_id, request.data)
+        return pb.Empty()
+
+    def ReadBlock(self, request, context):
+        """RPC: devuelve los bytes de un bloque. Lo llama el cliente al leer un archivo."""
+        with translate_file_system_errors_to_grpc(context):
+            data = self.block_storage.read_block(request.block_id)
+        return pb.BlockData(data=data)
+
+    def DeleteBlock(self, request, context):
+        """
+        RPC: borra un bloque que ya ningún archivo usa. Lo llama el superpeer.
+        Borrar un bloque que no existe no es error: el superpeer puede reintentar sin peligro.
+        """
+        with translate_file_system_errors_to_grpc(context):
+            self.block_storage.delete_block(request.block_id)
         return pb.Empty()
 
 
@@ -185,11 +219,14 @@ def install_stop_handlers(stop_event):
 
 
 def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory):
-    os.makedirs(data_directory, exist_ok=True)
+    # Crea la carpeta si no existe y borra los temporales de escrituras que quedaron a medias
+    block_storage = DiskBlockStorage(data_directory)
 
     # 1. Servidor primero: el superpeer le hará Ping durante el registro.
+    #    gRPC acepta mensajes de hasta 4 MB por defecto: alcanza para bloques de 1 MiB.
+    #    Con bloques más grandes habría que subir ese límite o enviar el bloque en streaming.
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
-    rpc.add_PeerServicer_to_server(Peer(peer_id, data_directory), server)
+    rpc.add_PeerServicer_to_server(Peer(peer_id, block_storage), server)
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     announced_address = f"{host}:{port}"
