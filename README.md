@@ -162,14 +162,44 @@ qué hacer si algo se compromete), seguir [docs/DESPLIEGUE.md](docs/DESPLIEGUE.m
 # en el contenedor client, que tiene las credenciales del .env y el certificado de cliente
 docker compose exec client python -m tools.peers_status  # tabla de peers: dirección, espacio libre, vivo o muerto
 docker compose logs -f peer1                        # registro, reintentos y re-registros del peer
-python3 -m tests.test_peers                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
-docker compose exec client python -m tests.test_peer_blocks  # API de bloques de peer1, peer2 y peer3 (~5 s)
-docker compose exec client python -m tests.test_superpeer_blocks  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
-python3 -m tests.test_mount                               # montaje: lectura, escritura, archivos abiertos y peers caídos (en WSL, ~30 s; deja todo corriendo)
+python3 -m tests.integration.test_peers                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
+docker compose exec client python -m tests.integration.test_peer_blocks  # API de bloques de peer1, peer2 y peer3 (~5 s)
+docker compose exec client python -m tests.integration.test_superpeer_blocks  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
+python3 -m tests.integration.test_mount                               # montaje: lectura, escritura, archivos abiertos y peers caídos (en WSL, ~30 s; deja todo corriendo)
 # Respaldo sin FUSE (dfs_cli): si el montaje falla, o para ver en qué peers quedó cada bloque
 docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md   # subir (en /app está la carpeta del proyecto)
 docker compose exec client python -m dfsha.client.dfs_cli blocks /readme.md               # bloques y en qué peers está cada uno
 docker compose exec client python -m dfsha.client.dfs_cli get /readme.md /tmp/readme.md   # bajar
+```
+
+## Pruebas
+
+```bash
+# Unitarias (sin red, ~5 s): registro, persistencia, almacenamiento y cifrado, usuarios, tokens,
+# limpiador y monitor de réplicas
+docker compose run --rm sp1 python -m pytest tests/unit
+
+# Integración (con todos los servicios levantados)
+docker compose exec sp1 python -m tests.integration.test_security            # login, mTLS, roles, permisos de bloque (~10 s)
+docker compose exec client python -m tests.integration.test_peer_blocks      # API de bloques de los peers (~5 s)
+docker compose exec client python -m tests.integration.test_superpeer_blocks # plan, commit y ubicaciones (~2 s)
+
+# Fallas (fuera de los contenedores, desde la raíz del repo): reinicia y apaga servicios
+python3 -m tests.integration.test_peers      # registro, caída y regreso de un peer, reinicio del superpeer (~1 min)
+python3 -m tests.integration.test_failures   # persistencia, réplica alternativa, re-replicación, limpieza (~2 min)
+python3 -m tests.integration.test_mount     # montaje FUSE: cat, cp, >, >>, truncate, sed -i, archivos abiertos, peers caídos (~30 s)
+```
+
+## Mediciones
+
+Los scripts de `benchmarks/` miden transferencia, metadatos, costo de la seguridad y disponibilidad;
+los resultados y su análisis están en [benchmarks/RESULTADOS.md](benchmarks/RESULTADOS.md).
+
+```bash
+docker compose exec client python -m benchmarks.bench_transfer     # put/get por tamaño y paralelismo (~7 min)
+docker compose exec client python -m benchmarks.bench_metadata     # operaciones de metadatos por segundo
+docker compose run --rm sp1 python -m benchmarks.bench_internals   # cifrado, TLS y snapshots
+python3 -m benchmarks.bench_availability                           # detección, re-replicación, reinicio (~3 min)
 ```
 
 ## Desarrollo

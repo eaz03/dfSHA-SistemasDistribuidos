@@ -3,7 +3,7 @@ Prueba de la API de bloques de los peers (WriteBlock, ReadBlock, DeleteBlock), h
 con cada peer: sin FUSE y sin pasar por el registro del superpeer.
 
 Se ejecuta dentro de un contenedor (necesita grpc y el código generado), desde WSL:
-  docker compose exec client python -m tests.test_peer_blocks
+  docker compose exec client python -m tests.integration.test_peer_blocks
 Opciones: --peers peer1:7100,peer2:7100,peer3:7100   --superpeer localhost:7000
 Al terminar borra los bloques que escribió.
 """
