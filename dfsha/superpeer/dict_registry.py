@@ -460,6 +460,34 @@ class DictRegistry(Registry):
             self._namespaces = namespaces
             self._pending_blocks = {}        # los planes no se guardan: son estado temporal
 
+    def under_replicated_blocks(self, available_peer_ids):
+        available_peer_ids = set(available_peer_ids)
+        with self._lock:
+            result = []
+            for user, user_namespace in self._namespaces.items():
+                for path, entry in user_namespace.items():
+                    if entry["is_dir"]:
+                        continue
+                    for block in entry["blocks"]:
+                        present = sum(1 for peer_id in block.peer_ids if peer_id in available_peer_ids)
+                        if 0 < present < self._replication_factor:
+                            result.append((user, path, block))
+            return result
+
+    def add_block_replica(self, user, path, block_id, peer_id):
+        with self._lock:
+            file_entry = self._namespace(user).get(path)
+            if file_entry is None or file_entry["is_dir"]:
+                raise FileSystemError(errno.ENOENT, path)
+            for position, block in enumerate(file_entry["blocks"]):
+                if block.block_id == block_id:
+                    if peer_id not in block.peer_ids:
+                        # BlockInfo es inmutable: se reemplaza por uno nuevo con la réplica agregada
+                        file_entry["blocks"][position] = BlockInfo(block_id=block.block_id, size=block.size,
+                                                                   peer_ids=block.peer_ids + (peer_id,))
+                    return
+            raise FileSystemError(errno.ENOENT, path)      # el bloque ya no es parte del archivo
+
     def expire_pending_blocks(self):
         with self._lock:
             now = self._clock()
