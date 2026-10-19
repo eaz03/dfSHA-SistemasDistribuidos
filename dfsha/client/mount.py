@@ -529,7 +529,7 @@ class DFShaFS(Operations):
 
 def main():
     if len(sys.argv) != 3:
-        sys.exit("usage: python -m dfsha.client.mount <superpeer host:port> <mountpoint>")
+        sys.exit("usage: python -m dfsha.client.mount <superpeer host:port>[,<otro superpeer>...] <mountpoint>")
 
     # Credenciales por variables de entorno: en Docker Compose vienen del archivo .env (fuera de git)
     username = os.environ.get("DFSHA_USER")
@@ -539,7 +539,10 @@ def main():
     tls_dir = os.environ.get("DFSHA_TLS_DIR", "certs/client")    # certificado de esta máquina (make_certs.py)
 
     try:
-        client = DFSClient([sys.argv[1]], username, password, tls_dir)
+        superpeers = []
+        for address in sys.argv[1].split(","):       # p. ej. "sp1:7000,sp2:7000": el cliente se conecta al dueño
+            superpeers.append(address.strip())
+        client = DFSClient(superpeers, username, password, tls_dir)
     except grpc.RpcError as rpc_error:
         sys.exit(f"login failed: {rpc_error.details()}")
     print(f"connected to: {client.addr}")

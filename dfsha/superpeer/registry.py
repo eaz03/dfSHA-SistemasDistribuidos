@@ -189,6 +189,20 @@ class Registry(ABC):
     def import_state(self, state):
         """Reemplaza todo el espacio de nombres por state (lo devuelto por export_state)."""
 
+    @abstractmethod
+    def export_user_state(self, user):
+        """
+        Como export_state, pero solo el espacio de nombres de user. Lo usa la federación de superpeers
+        para entregarle a otro superpeer una copia completa de un usuario.
+        """
+
+    @abstractmethod
+    def import_user_state(self, user, state):
+        """
+        Reemplaza el espacio de nombres de user por state (lo devuelto por export_user_state), sin
+        tocar a los demás usuarios. Descarta los planes pendientes de user.
+        """
+
     # ---------- Re-replicación ----------
     # Un bloque queda con menos réplicas de las acordadas si un peer muere o si se escribió cuando
     # había pocos peers. El monitor de réplicas del superpeer los busca y les agrega copias.

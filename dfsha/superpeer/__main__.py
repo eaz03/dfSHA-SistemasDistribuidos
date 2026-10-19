@@ -18,22 +18,35 @@ from dfsha.superpeer import replication_monitor
 from dfsha.superpeer.replication_monitor import ReplicationMonitor
 from dfsha.superpeer.persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
 from dfsha.superpeer.registry import BlockInfo
+from dfsha.superpeer.federation import FederationServicer, STARTUP_GRACE_SECONDS, SuperpeerFederation, parse_superpeers
+from dfsha.superpeer.replicated_registry import NotServingError, ReplicatedRegistry
 from dfsha.common.tls import create_secure_server, secure_channel
 
 DEMO_USER = "demo"                  # dueño de las entradas de ejemplo de --demo (crear su cuenta con manage_users.py)
 # RPCs que no piden token: Login (es el que lo entrega) y los de los peers, que no son usuarios.
 # Todos los demás, incluidos los que se agreguen, lo exigen.
+FEDERATION_METHODS = [
+    "/dfsha.Federation/Heartbeat",
+    "/dfsha.Federation/AppendLog",
+    "/dfsha.Federation/FetchUser",
+    "/dfsha.Federation/FetchUserRecords",
+]
 PUBLIC_METHODS = {
     "/dfsha.Superpeer/Login",
     "/dfsha.Superpeer/RegisterPeer",
     "/dfsha.Superpeer/Heartbeat",
 }
 # Los de los peers se protegen con su certificado (mTLS): solo un nodo con rol "peer" puede llamarlos,
-# así nadie más puede registrar un peer falso para recibir bloques ajenos
+# así nadie más puede registrar un peer falso para recibir bloques ajenos.
+# Los de la federación, igual: solo otro superpeer puede enviar operaciones o pedir usuarios
 NODE_METHOD_ROLES = {
     "/dfsha.Superpeer/RegisterPeer": "peer",
     "/dfsha.Superpeer/Heartbeat": "peer",
 }
+for federation_method in FEDERATION_METHODS:
+    PUBLIC_METHODS.add(federation_method)           # no son de un usuario: no llevan token
+    NODE_METHOD_ROLES[federation_method] = "superpeer"
+
 HEARTBEAT_INTERVAL_SECONDS = 3.0    # cada cuánto envían heartbeat los peers; muertos tras 3 perdidos (9 s)
 PING_TIMEOUT_SECONDS = 2.0          # cuánto espera RegisterPeer la respuesta del peer
 REPLICATE_TIMEOUT_SECONDS = 15.0    # una copia de re-replicación: el destino lee hasta 1 MiB del origen
@@ -46,8 +59,9 @@ def clean_path(path):
     return posixpath.normpath("/" + path.lstrip("/"))
 
 class Superpeer(rpc.SuperpeerServicer):
-    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner):
+    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner, federation):
         self.node_id = node_id
+        self.federation = federation       # los demás superpeers: quién es el dueño de cada usuario
         self.tls_dir = tls_dir             # certificado de este superpeer, para hablar con los peers
         self.block_cleaner = block_cleaner # borra de los peers los bloques que quedan obsoletos
         self.registry = registry           # cualquier implementación de registry.Registry
@@ -64,6 +78,15 @@ class Superpeer(rpc.SuperpeerServicer):
     # El superpeer no sabe cómo está guardado el registro, ni si necesita locks:
     # eso lo resuelve la implementación de Registry.
     # El usuario sale de current_user(): el interceptor ya verificó su token antes de llegar aquí.
+    # Las operaciones de un usuario usan _served_user(): con varios superpeers, solo el dueño del
+    # usuario las atiende; los demás responden EAGAIN (UNAVAILABLE) y el cliente se cambia al dueño.
+
+    def _served_user(self):
+        """El usuario de la llamada, si este superpeer lo atiende ahora; si no, lanza NotServingError."""
+        user = current_user()
+        if not self.federation.serves(user):
+            raise NotServingError(user)
+        return user
 
     def Login(self, request, context):
         """
@@ -74,48 +97,55 @@ class Superpeer(rpc.SuperpeerServicer):
         if not self.user_store.authenticate(request.username, request.password):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "invalid username or password")
         token = self.token_issuer.issue(request.username)
-        return pb.LoginReply(token=token, expires_in_seconds=self.token_issuer.ttl_seconds)
+        # Cualquier superpeer acepta el login (todos tienen los mismos usuarios), y le dice al cliente
+        # cuál atiende a ese usuario ahora, para que se conecte a ese
+        owner = self.federation.owner_of(request.username)
+        owner_address = ""
+        if owner is not None:
+            owner_address = owner.address
+        return pb.LoginReply(token=token, expires_in_seconds=self.token_issuer.ttl_seconds,
+                             owner_address=owner_address)
 
     def Stat(self, request, context):
         """RPC: metadatos de un path. Lo usa getattr en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            entry = self.registry.stat(current_user(), path)
+            entry = self.registry.stat(self._served_user(), path)
         return pb.Attr(is_dir=entry.is_dir, size=entry.size, mtime=entry.mtime)
 
     def ListDir(self, request, context):
         """RPC: nombres de los hijos directos de un directorio. Lo usa readdir en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            child_names = self.registry.list_directory(current_user(), path)
+            child_names = self.registry.list_directory(self._served_user(), path)
         return pb.DirListing(names=child_names)
 
     def MakeDir(self, request, context):
         """RPC: crea un directorio vacío. Lo usa mkdir en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.make_directory(current_user(), path, now=time.time())
+            self.registry.make_directory(self._served_user(), path, now=time.time())
         return pb.Empty()
 
     def RemoveDir(self, request, context):
         """RPC: borra un directorio vacío. Lo usa rmdir en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.remove_directory(current_user(), path, now=time.time())
+            self.registry.remove_directory(self._served_user(), path, now=time.time())
         return pb.Empty()
 
     def CreateFile(self, request, context):
         """RPC: crea un archivo vacío. Lo usa create (touch, primer paso de cp) en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.create_file(current_user(), path, now=time.time())
+            self.registry.create_file(self._served_user(), path, now=time.time())
         return pb.Empty()
 
     def Delete(self, request, context):
         """RPC: borra un archivo. Lo usa unlink (comando rm) en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            obsolete_blocks = self.registry.delete_file(current_user(), path, now=time.time())
+            obsolete_blocks = self.registry.delete_file(self._served_user(), path, now=time.time())
         self.block_cleaner.schedule(obsolete_blocks)     # sus bloques ya no los usa nadie
         return pb.Empty()
 
@@ -124,7 +154,7 @@ class Superpeer(rpc.SuperpeerServicer):
         source_path = clean_path(request.source_path)
         destination_path = clean_path(request.destination_path)
         with translate_file_system_errors_to_grpc(context):
-            obsolete_blocks = self.registry.rename(current_user(), source_path, destination_path, now=time.time())
+            obsolete_blocks = self.registry.rename(self._served_user(), source_path, destination_path, now=time.time())
         self.block_cleaner.schedule(obsolete_blocks)     # los del archivo reemplazado en el destino, si había uno
         return pb.Empty()
 
@@ -182,6 +212,10 @@ class Superpeer(rpc.SuperpeerServicer):
             peer_statuses.append(peer_status)
         return pb.PeerList(peers=peer_statuses)
 
+    def ListSuperpeers(self, request, context):
+        """RPC: los superpeers según este (vivos, listos, a qué usuarios atiende cada uno) y su posición en cada log."""
+        return self.federation.view()
+
     # ---------- RPC: bloques ----------
     # El superpeer nunca toca los bytes: entrega IDs de bloques y dónde están (o dónde escribirlos),
     # y el cliente habla directo con los peers.
@@ -194,7 +228,7 @@ class Superpeer(rpc.SuperpeerServicer):
         """
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            blocks = self.registry.get_block_locations(current_user(), path)
+            blocks = self.registry.get_block_locations(self._served_user(), path)
         return self._block_list_reply(blocks, "read")
 
     def AllocateBlocks(self, request, context):
@@ -204,7 +238,7 @@ class Superpeer(rpc.SuperpeerServicer):
         """
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            blocks = self.registry.allocate_blocks(current_user(), path, request.size)
+            blocks = self.registry.allocate_blocks(self._served_user(), path, request.size)
         return self._block_list_reply(blocks, "write")
 
     def CommitFile(self, request, context):
@@ -223,7 +257,7 @@ class Superpeer(rpc.SuperpeerServicer):
             blocks.append(block)
 
         with translate_file_system_errors_to_grpc(context):
-            obsolete_blocks = self.registry.commit_file(current_user(), path, request.size, blocks, now=time.time())
+            obsolete_blocks = self.registry.commit_file(self._served_user(), path, request.size, blocks, now=time.time())
         # Los de la versión anterior: se borran de sus peers después del período de gracia, para que
         # quien estaba leyendo la versión vieja alcance a terminar
         self.block_cleaner.schedule(obsolete_blocks)
@@ -300,8 +334,8 @@ def seed_demo_entries(registry):
     registry.create_file(DEMO_USER, "/readme.md", now)
 
 
-def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir, registry_dir, snapshot_every,
-          deletion_grace_seconds, cleaner_interval_seconds, pending_plan_ttl_seconds,
+def serve(node_id, port, superpeers, demo, users_file, token_key_file, token_ttl_seconds, tls_dir, registry_dir,
+          snapshot_every, deletion_grace_seconds, cleaner_interval_seconds, pending_plan_ttl_seconds,
           replication_delay_seconds, replication_interval_seconds):
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
@@ -312,18 +346,24 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
 
     # El registro en memoria, envuelto por la persistencia: cada modificación queda en un log en
     # registry_dir y al arrancar se reconstruye desde ahí (para cambiar de registro, se cambia esta línea)
-    registry = PersistentRegistry(DictRegistry(live_peers=peers_available_for_blocks, block_size=BLOCK_SIZE_BYTES,
-                                               pending_plan_ttl_seconds=pending_plan_ttl_seconds),
-                                  registry_dir, snapshot_every)
-    if demo:
-        seed_demo_entries(registry)
+    persistent_registry = PersistentRegistry(DictRegistry(live_peers=peers_available_for_blocks,
+                                                          block_size=BLOCK_SIZE_BYTES,
+                                                          pending_plan_ttl_seconds=pending_plan_ttl_seconds),
+                                             registry_dir, snapshot_every)
 
     # Autenticación: la clave privada firma los tokens y la pública los verifica.
-    # La clave se crea la primera vez y vive en un volumen aparte (/keys), nunca en el repositorio
+    # La clave se crea la primera vez y vive en un volumen aparte (/keys), nunca en el repositorio.
+    # Cada superpeer tiene la suya: los peers guardan la pública de cada uno (se la dan al registrarse)
     signing_key = load_or_create_signing_key(token_key_file)
     token_issuer = TokenIssuer(signing_key, ttl_seconds=token_ttl_seconds)
     token_verifier = TokenVerifier(signing_key.public_key())
     user_store = JsonUserStore(users_file)    # para cambiar de almacén de usuarios, se cambia esta línea (y el import)
+
+    # Federación: los demás superpeers, y el registro replicado que el resto del superpeer usa.
+    # Con un solo superpeer en la lista todo funciona igual que antes: es el dueño de todos los usuarios
+    federation = SuperpeerFederation(node_id, superpeers, tls_dir, user_store)
+    registry = ReplicatedRegistry(persistent_registry, federation)
+    federation.use_registry(registry)
 
     # Limpiador y monitor de réplicas: trabajan en segundo plano y hablan con los peers con el
     # certificado de este superpeer (solo un superpeer puede usar DeleteBlock y ReplicateBlock)
@@ -353,19 +393,35 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
                                  delay_seconds=replication_delay_seconds, interval_seconds=replication_interval_seconds)
     monitor.start()
 
-    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner)
+    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner, federation)
     # Primero el rol del nodo (certificado) y luego el usuario (token)
     interceptors = [RoleInterceptor(NODE_METHOD_ROLES), AuthenticationInterceptor(token_verifier, PUBLIC_METHODS)]
     server = create_secure_server(port, tls_dir, interceptors=interceptors)   # solo mTLS: no hay puerto sin cifrar
     rpc.add_SuperpeerServicer_to_server(servicer, server)
+    rpc.add_FederationServicer_to_server(FederationServicer(federation, registry, user_store), server)
     server.start()
-    print(f"superpeer {node_id} listening on :{port}" + (" (demo data)" if demo else ""))
+    federation.start()                     # después del servidor: los demás superpeers ya pueden responderle
+    superpeer_ids = []
+    for superpeer in superpeers:
+        superpeer_ids.append(superpeer.superpeer_id)
+    print(f"superpeer {node_id} listening on :{port}, federation: {', '.join(superpeer_ids)}", flush=True)
+
+    # Las entradas de ejemplo se crean como cualquier operación: en el dueño del usuario demo y replicadas.
+    # Por eso se espera a que la federación esté lista (y solo las crea el superpeer que atiende a demo)
+    if demo:
+        federation.wait_until_ready(STARTUP_GRACE_SECONDS + 5)
+        if federation.serves(DEMO_USER):
+            seed_demo_entries(registry)
+            print("demo data ready", flush=True)
     server.wait_for_termination()
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--id", default="sp1")
     p.add_argument("--port", type=int, default=7000)
+    p.add_argument("--superpeers", default=None,
+                   help="todos los superpeers, incluido este, en orden: sp1=sp1:7000,sp2=sp2:7000 "
+                        "(sin esta opción, solo este, en <id>:<port>)")
     p.add_argument("--demo", action="store_true")
     p.add_argument("--users-file", default="/data/users.json", help="usuarios (crear con manage_users.py)")
     p.add_argument("--token-key", default="/keys/token.key", help="clave privada que firma los tokens")
@@ -385,5 +441,10 @@ if __name__ == "__main__":
     p.add_argument("--replication-interval", type=float, default=replication_monitor.DEFAULT_INTERVAL_SECONDS,
                    help="cada cuántos segundos el monitor busca bloques subreplicados")
     a = p.parse_args()
-    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir, a.registry_dir, a.snapshot_every,
-          a.deletion_grace, a.cleaner_interval, a.pending_plan_ttl, a.replication_delay, a.replication_interval)
+    if a.superpeers is None:
+        superpeer_list = parse_superpeers(f"{a.id}={a.id}:{a.port}")
+    else:
+        superpeer_list = parse_superpeers(a.superpeers)
+    serve(a.id, a.port, superpeer_list, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir, a.registry_dir,
+          a.snapshot_every, a.deletion_grace, a.cleaner_interval, a.pending_plan_ttl, a.replication_delay,
+          a.replication_interval)

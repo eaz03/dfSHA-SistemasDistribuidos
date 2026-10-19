@@ -10,17 +10,28 @@ ListPeers pide token: usa las credenciales del montaje (DFSHA_USER, DFSHA_PASSWO
 import argparse
 import json
 
+import grpc
+
 from dfsha.proto import dfsha_pb2 as pb
-from dfsha.client.auth_client import authenticated_superpeer_stub, credentials_from_environment
+from dfsha.client.auth_client import authenticated_superpeer_stub, credentials_from_environment, superpeers_from_environment
 
 BYTES_PER_MB = 1024 * 1024
 
 
-def fetch_peers(superpeer_address):
-    """Pide ListPeers al superpeer y devuelve la lista de pb.PeerStatus."""
+def fetch_peers(superpeer_addresses):
+    """
+    Pide ListPeers al primer superpeer de la lista que responda y devuelve la lista de pb.PeerStatus
+    (cada superpeer tiene su propia tabla, pero los peers se registran en todos: son iguales).
+    """
     username, password, tls_dir = credentials_from_environment()
-    superpeer_stub = authenticated_superpeer_stub(superpeer_address, username, password, tls_dir)
-    return superpeer_stub.ListPeers(pb.Empty(), timeout=3).peers
+    last_error = None
+    for superpeer_address in superpeer_addresses:
+        try:
+            superpeer_stub = authenticated_superpeer_stub(superpeer_address, username, password, tls_dir)
+            return superpeer_stub.ListPeers(pb.Empty(), timeout=3).peers
+        except grpc.RpcError as rpc_error:
+            last_error = rpc_error                     # caído: se prueba el siguiente
+    raise last_error
 
 
 def print_table(peers):
@@ -57,11 +68,12 @@ def print_json(peers):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tabla de peers del superpeer")
-    parser.add_argument("--superpeer", default="sp1:7000", help="dirección del superpeer")
+    parser.add_argument("--superpeer", default=",".join(superpeers_from_environment()),
+                        help="direcciones de los superpeers, separadas por comas: se usa el primero que responda")
     parser.add_argument("--json", action="store_true", help="salida en JSON")
     arguments = parser.parse_args()
 
-    peers = fetch_peers(arguments.superpeer)
+    peers = fetch_peers(arguments.superpeer.split(","))
     if arguments.json:
         print_json(peers)
     else:

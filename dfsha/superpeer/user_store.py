@@ -94,9 +94,10 @@ class UserStore(ABC):
     """
 
     @abstractmethod
-    def add_user(self, username, password):
+    def add_user(self, username, password, home=None):
         """
         Crea el usuario username con la contraseña password (se guarda solo su hash).
+        home: el id del superpeer que lo atiende normalmente (p. ej. "sp2"); None = el primero de la lista.
         Errores (ValueError): nombre inválido, contraseña demasiado corta, o el usuario ya existe.
         """
 
@@ -114,6 +115,31 @@ class UserStore(ABC):
     @abstractmethod
     def _password_hash_of(self, username):
         """Devuelve el hash guardado de username, o None si no existe. Solo lo usa authenticate."""
+
+    # ---------- Federación: los usuarios son los mismos en todos los superpeers ----------
+
+    @abstractmethod
+    def home_of(self, username):
+        """El id del superpeer que atiende normalmente a username, o None (no tiene, o no existe)."""
+
+    @abstractmethod
+    def export_records(self):
+        """
+        Todos los registros, incluidos los borrados, como datos JSON:
+        {usuario: {"password_hash", "home", "updated_at"}} o {usuario: {"deleted": True, "updated_at"}}.
+        """
+
+    @abstractmethod
+    def merge_records(self, records):
+        """
+        Fusiona los registros de otro superpeer (lo devuelto por su export_records): por cada usuario
+        queda el registro cambiado más recientemente (updated_at), también si es un borrado. Así dos
+        superpeers que fusionan sus registros quedan iguales, sin importar el orden. Devuelve cuántos cambiaron.
+        """
+
+    @abstractmethod
+    def fingerprint(self):
+        """Un resumen (hash) de todos los registros: dos superpeers con la misma huella tienen los mismos usuarios."""
 
     def authenticate(self, username, password):
         """

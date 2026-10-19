@@ -24,6 +24,7 @@ service Superpeer {
 
   // ----- Inspección (pruebas, demo) -----
   rpc ListPeers(Empty) returns (PeerList);                   // estado de todos los peers conocidos
+  rpc ListSuperpeers(Empty) returns (SuperpeerView);         // superpeers vivos y qué usuarios atiende cada uno
 
   // ----- Cliente -> Superpeer: bloques -----
   rpc GetBlockLocations(PathRequest) returns (BlockList);    // open: qué bloques forman el archivo y dónde están
@@ -42,6 +43,16 @@ service Peer {
                                                                // (re-replicación; los bytes van peer -> peer)
 }
 
+// ======================= Federación: superpeer <-> superpeer =======================
+// Solo la puede llamar un nodo con certificado de superpeer. Cada usuario tiene un superpeer dueño
+// (el único que modifica su espacio de nombres); los demás guardan una copia al día de su log.
+service Federation {
+  rpc Heartbeat(FederationStatus) returns (FederationStatus);   // cada segundo, en ambos sentidos: "sigo vivo y voy en..."
+  rpc AppendLog(LogRecord) returns (AppendLogReply);            // el dueño envía cada operación nueva a los demás
+  rpc FetchUser(UserRequest) returns (UserState);               // un superpeer atrasado pide el estado completo de un usuario
+  rpc FetchUserRecords(Empty) returns (UserRecords);            // los usuarios y contraseñas (hashes), para fusionarlos
+}
+
 // ======================= Mensajes comunes =======================
 
 message Empty {}      // respuesta sin datos: el éxito es simplemente no recibir un error
@@ -56,6 +67,7 @@ message LoginRequest {
 message LoginReply {
   string token = 1;                  // JWT firmado por el superpeer; se adjunta en cada RPC
   double expires_in_seconds = 2;     // cuánto dura; al vencer, el cliente vuelve a hacer Login
+  string owner_address = 3;          // el superpeer que atiende a este usuario ahora: el cliente se conecta a ese
 }
 
 // ======================= Espacio de nombres =======================
@@ -167,4 +179,58 @@ message CommitRequest {
   string path = 1;
   int64  size = 2;
   repeated BlockLocation blocks = 3;   // en cada bloque, solo las réplicas que SÍ se escribieron
+}
+
+// ======================= Federación =======================
+
+message UserPosition {           // hasta dónde va el log de un usuario en un superpeer
+  string user = 1;
+  int64  epoch = 2;              // sube cada vez que el usuario cambia de dueño
+  string epoch_owner = 3;        // el superpeer que abrió esa época (desempata dos épocas con el mismo número)
+  int64  seq = 4;                // número de la última operación aplicada de ese usuario
+}
+
+message FederationStatus {       // lo que cada superpeer cuenta de sí mismo en el heartbeat
+  string superpeer_id = 1;
+  bool   ready = 2;              // false mientras arranca y se pone al día: todavía no atiende usuarios
+  repeated UserPosition positions = 3;
+  string users_fingerprint = 4;  // huella de sus usuarios: si difiere de la propia, hay que fusionarlos
+}
+
+message LogRecord {
+  string user = 1;
+  string record_json = 2;        // la misma línea JSON del log, con su posición (época, dueño, seq)
+}
+
+message AppendLogReply {
+  bool applied = 1;              // false: no la aplicó (está atrasado y se pondrá al día, o la época es vieja)
+  bool stale_epoch = 2;          // true: quien envió tiene una época vieja; otro superpeer tomó al usuario
+  UserPosition position = 3;     // la posición de quien responde, después de recibirla
+}
+
+message UserRequest {
+  string user = 1;
+}
+
+message UserState {
+  string user = 1;
+  string state_json = 2;         // {"position": ..., "namespace": ...}: el espacio de nombres completo del usuario
+}
+
+message UserRecords {
+  string records_json = 1;       // {usuario: {password_hash, home, updated_at} o {deleted, updated_at}}
+}
+
+message SuperpeerStatus {        // un superpeer, según el que responde ListSuperpeers
+  string superpeer_id = 1;
+  string address = 2;
+  bool   alive = 3;
+  bool   ready = 4;
+  repeated string served_users = 5;   // los usuarios que atiende ahora
+}
+
+message SuperpeerView {
+  string superpeer_id = 1;            // quién responde
+  repeated SuperpeerStatus superpeers = 2;
+  repeated UserPosition positions = 3;   // hasta dónde va el log de cada usuario en quien responde
 }

@@ -1,47 +1,58 @@
 services:
+  # Superpeers: los dos con la lista completa (--superpeers, en orden). Cada usuario tiene un dueño
+  # (su "home", o el primero de la lista); el otro guarda una copia al día y lo atiende si el dueño cae
   sp1:
     build: .
-    command: python -m dfsha.superpeer --id sp1 --port 7000 --demo --tls-dir certs/sp1
+    command: python -m dfsha.superpeer --id sp1 --port 7000 --superpeers sp1=sp1:7000,sp2=sp2:7000 --demo --tls-dir certs/sp1
     # /data: usuarios (users.json) y registro persistente (registry/: log + snapshot).
     # /keys: clave que firma los tokens, aparte de los datos
     volumes: [".:/app", "sp1-data:/data", "sp1-keys:/keys"]
 
+  sp2:
+    build: .
+    command: python -m dfsha.superpeer --id sp2 --port 7000 --superpeers sp1=sp1:7000,sp2=sp2:7000 --tls-dir certs/sp2
+    volumes: [".:/app", "sp2-data:/data", "sp2-keys:/keys"]
+
   # Peers: mismo código, cada uno con su id, su nombre en la red, su certificado (--tls-dir),
-  # su volumen de bloques (/data) y, aparte, el de la clave que cifra esos bloques (/keys)
+  # su volumen de bloques (/data) y, aparte, el de la clave que cifra esos bloques (/keys).
+  # Se registran en los dos superpeers
   peer1:
     build: .
-    command: python -m dfsha.peer --id peer1 --host peer1 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer1 --block-key /keys/blocks.key
+    command: python -m dfsha.peer --id peer1 --host peer1 --port 7100 --superpeer sp1:7000,sp2:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer1 --block-key /keys/blocks.key
     volumes: [".:/app", "peer1-data:/data", "peer1-keys:/keys"]
-    depends_on: [sp1]
+    depends_on: [sp1, sp2]
 
   peer2:
     build: .
-    command: python -m dfsha.peer --id peer2 --host peer2 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer2 --block-key /keys/blocks.key
+    command: python -m dfsha.peer --id peer2 --host peer2 --port 7100 --superpeer sp1:7000,sp2:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer2 --block-key /keys/blocks.key
     volumes: [".:/app", "peer2-data:/data", "peer2-keys:/keys"]
-    depends_on: [sp1]
+    depends_on: [sp1, sp2]
 
   peer3:
     build: .
-    command: python -m dfsha.peer --id peer3 --host peer3 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer3 --block-key /keys/blocks.key
+    command: python -m dfsha.peer --id peer3 --host peer3 --port 7100 --superpeer sp1:7000,sp2:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer3 --block-key /keys/blocks.key
     volumes: [".:/app", "peer3-data:/data", "peer3-keys:/keys"]
-    depends_on: [sp1]
+    depends_on: [sp1, sp2]
 
   client:
     build: .
-    command: python -m dfsha.client.mount sp1:7000 /mnt/dfsha
+    command: python -m dfsha.client.mount sp1:7000,sp2:7000 /mnt/dfsha
     volumes: [".:/app"]
-    # Credenciales del montaje: se leen del archivo .env (fuera de git; ver .env.example)
+    # Credenciales del montaje: se leen del archivo .env (fuera de git; ver .env.example).
+    # DFSHA_SUPERPEERS: los superpeers que usan las herramientas (tools.*, dfs_cli)
     environment: ["DFSHA_DEBUG=1", "DFSHA_USER=${DFSHA_USER}", "DFSHA_PASSWORD=${DFSHA_PASSWORD}",
-                  "DFSHA_TLS_DIR=certs/client"]
+                  "DFSHA_TLS_DIR=certs/client", "DFSHA_SUPERPEERS=sp1:7000,sp2:7000"]
     devices: ["/dev/fuse"]
     cap_add: ["SYS_ADMIN"]
     security_opt: ["apparmor:unconfined"]
-    depends_on: [sp1]
+    depends_on: [sp1, sp2]
     restart: on-failure
 
 volumes:           # sobreviven a docker compose down, se borran con down -v
-  sp1-data:        # usuarios y registro persistente (log + snapshot) del superpeer
-  sp1-keys:        # clave privada de los tokens: separada de los datos
+  sp1-data:        # usuarios y registro persistente (log + snapshot) de cada superpeer
+  sp2-data:
+  sp1-keys:        # clave privada de los tokens de cada superpeer: separada de los datos
+  sp2-keys:
   peer1-data:      # bloques (cifrados) de cada peer
   peer2-data:
   peer3-data:

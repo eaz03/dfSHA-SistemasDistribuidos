@@ -37,6 +37,7 @@ CA_VALIDITY_DAYS = 365
 # Los nodos del docker-compose y los nombres con que se los encuentra (localhost: para pruebas
 # dentro del mismo contenedor)
 DEV_NODES = [("superpeer", "sp1", ["sp1", "localhost"]),
+             ("superpeer", "sp2", ["sp2"]),
              ("peer", "peer1", ["peer1", "localhost"]),
              ("peer", "peer2", ["peer2"]),
              ("peer", "peer3", ["peer3"]),

@@ -2,8 +2,12 @@
 Administración de usuarios de DFSha desde la terminal.
 
     docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json add sofi
+    docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json add luis --home sp2
     docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json list
     docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json remove sofi
+
+--home dice qué superpeer atiende normalmente al usuario (sin --home, el primero de la lista).
+Basta con crearlo en un superpeer: los superpeers se pasan los usuarios entre sí (federación).
 
 La contraseña se pide con getpass (no se ve al escribirla) y nunca se recibe como argumento:
 un argumento queda en el historial de la terminal y en la lista de procesos (ps).
@@ -30,7 +34,9 @@ def main():
     parser = argparse.ArgumentParser(description="Administración de usuarios de DFSha")
     parser.add_argument("--file", default=DEFAULT_USERS_FILE, help="archivo de usuarios")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("add", help="crear un usuario").add_argument("username")
+    add_parser = subcommands.add_parser("add", help="crear un usuario")
+    add_parser.add_argument("username")
+    add_parser.add_argument("--home", default=None, help="id del superpeer que lo atiende normalmente, p. ej. sp2")
     subcommands.add_parser("remove", help="borrar un usuario").add_argument("username")
     subcommands.add_parser("list", help="listar los usuarios")
     arguments = parser.parse_args()
@@ -38,7 +44,7 @@ def main():
     store = JsonUserStore(arguments.file)
     try:
         if arguments.command == "add":
-            store.add_user(arguments.username, ask_new_password())
+            store.add_user(arguments.username, ask_new_password(), home=arguments.home)
             print(f"user '{arguments.username}' created")
         elif arguments.command == "remove":
             store.remove_user(arguments.username)

@@ -4,12 +4,20 @@ Cliente para interactuar con el sistema de archivos distribuido.
 Habla con dos tipos de nodo:
   - el superpeer: metadatos (stat, ls, mkdir...) y ubicación de los bloques;
   - los peers: los bytes de los bloques, directamente, sin pasar por el superpeer.
+
+Con varios superpeers, cada usuario es atendido por uno solo (su dueño). El cliente recibe la
+lista completa y se conecta al dueño: el Login, que acepta cualquier superpeer, dice cuál es.
+Si el superpeer deja de responder, o responde que ya no atiende a este usuario (UNAVAILABLE),
+el cliente se cambia de superpeer y repite la llamada (failover), hasta FAILOVER_TIMEOUT_SECONDS:
+para quien usa el montaje es solo una pausa de unos segundos.
 """
 
 import errno
 import os
 import threading
+import time
 from concurrent import futures
+from dataclasses import dataclass
 
 import grpc
 
@@ -20,6 +28,9 @@ from dfsha.common.errors import FileSystemError, errno_from_rpc_error
 from dfsha.common.tls import secure_channel
 
 PARALLEL_BLOCK_TRANSFERS = 4      # bloques que se bajan o suben a la vez (en general, a peers distintos)
+CONNECT_TIMEOUT_SECONDS = 2.0     # cuánto se espera a que un superpeer acepte la conexión
+FAILOVER_TIMEOUT_SECONDS = 20.0   # cuánto se sigue probando superpeers antes de devolver el error
+FAILOVER_RETRY_DELAY_SECONDS = 1.0
 
 
 def describe_block_attempt(block_id, tried_peer_ids):
@@ -29,6 +40,15 @@ def describe_block_attempt(block_id, tried_peer_ids):
     else:
         tried_text = ", ".join(tried_peer_ids)
     return f"block {block_id[:8]} (tried: {tried_text})"
+
+
+@dataclass
+class _SuperpeerConnection:
+    """Un superpeer con el que ya se hizo Login (interno)."""
+    address: str
+    channel: object
+    stub: object                  # SuperpeerStub que adjunta el token en cada llamada
+    owner_address: str            # quién atiende a este usuario, según ese superpeer ("" si nadie)
 
 
 class DFSClient:
@@ -43,67 +63,140 @@ class DFSClient:
         self.addr = None
         self.channel = None
         self.stub = None
+        self.connection_generation = 0           # sube cada vez que se cambia de superpeer (ver upload_from_file)
         self._peer_stubs = {}                    # dirección del peer -> PeerStub (un canal por peer)
         self._peer_stubs_lock = threading.Lock() # varios hilos pueden pedir el mismo peer a la vez
         self._connect()
 
-    def _connect(self):
+    # ---------- Conexión al superpeer dueño ----------
+
+    def _open(self, address):
         """
-        Itera a través de la lista de superpeers, se conecta al primero que esté disponible y hace Login.
+        Se conecta a address y hace Login. Devuelve un _SuperpeerConnection, o None si no responde.
         Si las credenciales no sirven lanza grpc.RpcError (UNAUTHENTICATED): no tiene sentido probar
         otro superpeer, porque todos conocen los mismos usuarios.
         """
-        for addr in self.superpeers:
-            channel = secure_channel(addr, self.tls_dir)
-            try:
-                grpc.channel_ready_future(channel).result(timeout=self.timeout)
-            except grpc.FutureTimeoutError:
-                channel.close()
+        channel = secure_channel(address, self.tls_dir)
+        try:
+            grpc.channel_ready_future(channel).result(timeout=CONNECT_TIMEOUT_SECONDS)
+        except grpc.FutureTimeoutError:
+            channel.close()
+            return None
+        login_session = LoginSession(channel, self.username, self.password, self.timeout)
+        try:
+            login_session.token()                 # Login ya: unas credenciales malas fallan al conectar
+        except grpc.RpcError as rpc_error:
+            channel.close()
+            if rpc_error.code() == grpc.StatusCode.UNAUTHENTICATED:
+                raise
+            return None
+        # Todo lo que pase por este canal lleva el token; los métodos de abajo no cambian
+        authenticated_channel = grpc.intercept_channel(channel, BearerTokenInterceptor(login_session))
+        stub = rpc.SuperpeerStub(authenticated_channel)
+        return _SuperpeerConnection(address=address, channel=channel, stub=stub,
+                                    owner_address=login_session.owner_address)
+
+    def _addresses_to_try(self, failed_address):
+        """La lista de superpeers, empezando por el siguiente a failed_address (que va al final)."""
+        if failed_address not in self.superpeers:
+            return list(self.superpeers)
+        position = self.superpeers.index(failed_address)
+        return self.superpeers[position + 1:] + self.superpeers[:position + 1]
+
+    def _connect(self, failed_address=None):
+        """
+        Se conecta al superpeer que atiende a este usuario:
+          1. prueba los superpeers de la lista, empezando por el siguiente a failed_address,
+             hasta que uno acepte el Login;
+          2. si ese dice que el dueño es otro, se conecta al dueño (si responde; si no, se queda con
+             el primero, que lo redirigirá o lo atenderá cuando tome al usuario).
+        Lanza ConnectionError si ninguno responde.
+        """
+        for address in self._addresses_to_try(failed_address):
+            connection = self._open(address)
+            if connection is None:
                 continue
-            login_session = LoginSession(channel, self.username, self.password, self.timeout)
-            login_session.token()                     # Login ya: unas credenciales malas fallan al conectar
-            self.addr, self.channel = addr, channel
-            # Todo lo que pase por este canal lleva el token; los métodos de abajo no cambian
-            authenticated_channel = grpc.intercept_channel(channel, BearerTokenInterceptor(login_session))
-            self.stub = rpc.SuperpeerStub(authenticated_channel)
+            owner_address = connection.owner_address
+            if owner_address != "" and owner_address != address:
+                owner_connection = self._open(owner_address)
+                if owner_connection is not None:
+                    connection.channel.close()
+                    connection = owner_connection
+            self._use(connection)
             return
         raise ConnectionError(f"no superpeer reachable: {self.superpeers}")
+
+    def _use(self, connection):
+        if self.channel is not None:
+            self.channel.close()
+        if self.addr is not None and self.addr != connection.address:
+            print(f"switched to superpeer {connection.address}", flush=True)
+        self.addr = connection.address
+        self.channel = connection.channel
+        self.stub = connection.stub
+        self.connection_generation += 1
+
+    def _call(self, method_name, request):
+        """
+        Llama al RPC method_name del superpeer actual. Si responde UNAVAILABLE (caído, o ya no
+        atiende a este usuario), se cambia de superpeer y lo repite, hasta FAILOVER_TIMEOUT_SECONDS.
+        Repetir es seguro: un superpeer que no atiende al usuario no aplicó la operación.
+        Cualquier otro error se lanza tal cual (p. ej. ENOENT).
+        """
+        deadline = time.monotonic() + FAILOVER_TIMEOUT_SECONDS
+        while True:
+            method = getattr(self.stub, method_name)         # p. ej. self.stub.Stat
+            try:
+                return method(request, timeout=self.timeout)
+            except grpc.RpcError as rpc_error:
+                if rpc_error.code() != grpc.StatusCode.UNAVAILABLE or time.monotonic() > deadline:
+                    raise
+            failed_address = self.addr
+            try:
+                self._connect(failed_address)
+            except ConnectionError:
+                pass                                         # ninguno responde todavía: se sigue intentando
+            time.sleep(FAILOVER_RETRY_DELAY_SECONDS)         # da tiempo a que otro superpeer tome al usuario
 
     # Cada método envía un RPC y devuelve la respuesta.
     # Los errores llegan como grpc.RpcError; traducirlos es trabajo de quien llama (el mount).
 
     def stat(self, path):
         """Metadatos de un path (tipo, tamaño, fecha)."""
-        return self.stub.Stat(pb.PathRequest(path=path), timeout=self.timeout)
+        return self._call("Stat", pb.PathRequest(path=path))
 
     def ls(self, path):
         """Nombres de los hijos directos de un directorio."""
-        return list(self.stub.ListDir(pb.PathRequest(path=path), timeout=self.timeout).names)
+        return list(self._call("ListDir", pb.PathRequest(path=path)).names)
 
     def mkdir(self, path):
         """Crea un directorio vacío."""
-        self.stub.MakeDir(pb.PathRequest(path=path), timeout=self.timeout)
+        self._call("MakeDir", pb.PathRequest(path=path))
 
     def rmdir(self, path):
         """Borra un directorio vacío."""
-        self.stub.RemoveDir(pb.PathRequest(path=path), timeout=self.timeout)
+        self._call("RemoveDir", pb.PathRequest(path=path))
 
     def rm(self, path):
         """Borra un archivo."""
-        self.stub.Delete(pb.PathRequest(path=path), timeout=self.timeout)
+        self._call("Delete", pb.PathRequest(path=path))
 
     def mv(self, source_path, destination_path):
         """Mueve o renombra un archivo o directorio."""
         request = pb.RenameRequest(source_path=source_path, destination_path=destination_path)
-        self.stub.Rename(request, timeout=self.timeout)
+        self._call("Rename", request)
 
     def create(self, path):
         """Crea un archivo vacío."""
-        self.stub.CreateFile(pb.PathRequest(path=path), timeout=self.timeout)
+        self._call("CreateFile", pb.PathRequest(path=path))
 
     def list_peers(self):
         """Estado de todos los peers que conoce el superpeer (lista de pb.PeerStatus)."""
-        return list(self.stub.ListPeers(pb.Empty(), timeout=self.timeout).peers)
+        return list(self._call("ListPeers", pb.Empty()).peers)
+
+    def list_superpeers(self):
+        """pb.SuperpeerView: los superpeers según el actual, y qué usuarios atiende cada uno."""
+        return self._call("ListSuperpeers", pb.Empty())
 
     # ---------- Peers ----------
     # Los bytes de los archivos van directo entre este cliente y los peers.
@@ -122,7 +215,7 @@ class DFSClient:
 
     def get_block_locations(self, path):
         """pb.BlockList de path: sus bloques en orden, las réplicas de cada uno (vivas primero) y block_size."""
-        return self.stub.GetBlockLocations(pb.PathRequest(path=path), timeout=self.timeout)
+        return self._call("GetBlockLocations", pb.PathRequest(path=path))
 
     def read_block(self, block_location):
         """
@@ -239,7 +332,20 @@ class DFSClient:
         Si path no existe, lo crea (su directorio padre sí debe existir); si existe, lo sobrescribe.
         Lee local_path bloque a bloque: nunca carga el archivo completo en memoria.
         Si algo falla antes del commit, path conserva su versión anterior completa.
+        Si a mitad de la subida el cliente se cambió de superpeer (failover), el plan era del anterior
+        y el nuevo no lo conoce: la subida se repite completa una vez, con un plan del nuevo.
         """
+        generation_before = self.connection_generation
+        try:
+            return self._upload_once(path, local_path)
+        except (grpc.RpcError, FileSystemError):
+            if self.connection_generation == generation_before:
+                raise                                       # mismo superpeer: es un error de verdad
+            print(f"{path}: superpeer changed during the upload, uploading again", flush=True)
+            return self._upload_once(path, local_path)
+
+    def _upload_once(self, path, local_path):
+        """Una subida completa: plan, bloques a los peers y commit (ver upload_from_file)."""
         # 1. Primero el archivo local: si no existe, falla aquí, antes de crear nada en DFSha
         file_size = os.path.getsize(local_path)
 
@@ -252,7 +358,7 @@ class DFSClient:
 
         # 3. El plan: qué bloques y en qué peers
         allocate_request = pb.AllocateRequest(path=path, size=file_size)
-        plan = self.stub.AllocateBlocks(allocate_request, timeout=self.timeout)
+        plan = self._call("AllocateBlocks", allocate_request)
 
         # 4. Subir cada bloque a sus réplicas, varios a la vez.
         #    El bloque i empieza donde terminan los anteriores (i * block_size).
@@ -272,5 +378,5 @@ class DFSClient:
 
         # 5. Hacer visible la versión nueva, con las réplicas que sí quedaron escritas
         commit_request = pb.CommitRequest(path=path, size=file_size, blocks=committed_blocks)
-        self.stub.CommitFile(commit_request, timeout=self.timeout)
+        self._call("CommitFile", commit_request)
         return committed_blocks

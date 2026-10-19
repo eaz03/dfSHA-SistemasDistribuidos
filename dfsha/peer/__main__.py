@@ -8,7 +8,9 @@ Dónde y cómo se guardan los bytes lo decide una implementación de BlockStorag
 Al arrancar:
   1. Levanta su servidor gRPC (servicio Peer). Va primero porque el superpeer
      le hace Ping durante el registro, para comprobar que la dirección anunciada responde.
-  2. Se registra en el superpeer, reintentando hasta que lo acepte.
+  2. Se registra en cada superpeer de la lista (--superpeer), reintentando hasta que lo acepte.
+     Con varios superpeers, cada uno tiene su propia tabla de peers: así cualquiera puede
+     atender a cualquier usuario si su dueño cae. Un hilo por superpeer.
   3. Envía un heartbeat cada heartbeat_interval_seconds (el intervalo lo decide el superpeer).
      - known=False (el superpeer se reinició y no lo conoce): se registra de nuevo.
      - el superpeer no responde: sigue intentando; cuando vuelva, recibirá known=False.
@@ -21,6 +23,7 @@ import os
 import shutil
 import signal
 import threading
+import time
 
 import grpc
 
@@ -66,31 +69,42 @@ class Peer(rpc.PeerServicer):
         self.peer_id = peer_id
         self.block_storage = block_storage       # cualquier implementación de block_storage.BlockStorage
         self.tls_dir = tls_dir                   # su certificado: para leer de otros peers al re-replicar
-        self.token_verifier = None               # llega con la clave pública del superpeer al registrarse
+        # Dirección del superpeer -> TokenVerifier con su clave pública (llega al registrarse en él).
+        # Cada superpeer firma con su propia clave: un permiso vale si lo firmó cualquiera de ellos
+        self.token_verifiers = {}
+        self.token_verifiers_lock = threading.Lock()   # cada membresía (un hilo por superpeer) agrega la suya
 
-    def use_superpeer_public_key(self, public_key_pem):
+    def use_superpeer_public_key(self, superpeer_address, public_key_pem):
         """La guarda SuperpeerMembership cada vez que el peer se registra (también si el superpeer cambió de clave)."""
-        self.token_verifier = TokenVerifier(load_verification_key_from_pem(public_key_pem))
+        token_verifier = TokenVerifier(load_verification_key_from_pem(public_key_pem))
+        with self.token_verifiers_lock:
+            self.token_verifiers[superpeer_address] = token_verifier
 
     def _authorize(self, request, operation, context):
         """
         Termina la llamada si quien llama no puede hacer operation sobre request.block_id.
         Un superpeer (según su certificado) no necesita permiso: es el plano de control de confianza.
-        Un cliente debe presentar el permiso que le entregó el superpeer para ese bloque y esa operación.
+        Un cliente debe presentar el permiso que le entregó un superpeer para ese bloque y esa operación.
+        Se prueba con la clave de cada superpeer conocido: el permiso es bueno si una de ellas verifica su firma.
         """
         if caller_role(context) == "superpeer":
             return
-        token_verifier = self.token_verifier
-        if token_verifier is None:
+        with self.token_verifiers_lock:
+            token_verifiers = list(self.token_verifiers.values())
+        if len(token_verifiers) == 0:
             context.abort(grpc.StatusCode.UNAVAILABLE, "peer not registered yet: cannot check block permissions")
         if not request.access_token:
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing block permission: get it from the superpeer")
-        try:
-            token_verifier.verify_block_token(request.access_token, request.block_id, operation)
-        except WrongBlockPermissionError as error:
-            context.abort(grpc.StatusCode.PERMISSION_DENIED, str(error))       # válido, pero para otra cosa
-        except InvalidTokenError as error:
-            context.abort(grpc.StatusCode.UNAUTHENTICATED, str(error))        # falso, vencido o de otro tipo
+        last_error = None
+        for token_verifier in token_verifiers:
+            try:
+                token_verifier.verify_block_token(request.access_token, request.block_id, operation)
+                return                                                         # firmado por este superpeer: vale
+            except WrongBlockPermissionError as error:
+                context.abort(grpc.StatusCode.PERMISSION_DENIED, str(error))   # firma buena, pero para otra cosa
+            except InvalidTokenError as error:
+                last_error = error                                             # no es de este superpeer: el siguiente
+        context.abort(grpc.StatusCode.UNAUTHENTICATED, str(last_error))        # falso, vencido o de otro tipo
 
     def Ping(self, request, context):
         """RPC: responde para demostrar que este peer atiende en esta dirección. Lo llama el superpeer."""
@@ -193,7 +207,7 @@ class SuperpeerMembership:
             try:
                 register_reply = self.superpeer_stub.RegisterPeer(self.peer_info, timeout=REGISTER_TIMEOUT_SECONDS)
                 self.heartbeat_interval_seconds = register_reply.heartbeat_interval_seconds
-                self.on_superpeer_public_key(register_reply.token_public_key)
+                self.on_superpeer_public_key(self.superpeer_address, register_reply.token_public_key)
                 print(f"registered in superpeer {self.superpeer_address} as {self.peer_info.address}, "
                       f"heartbeat every {self.heartbeat_interval_seconds:g} s")
                 return True
@@ -269,6 +283,16 @@ def compute_free_bytes(data_directory, capacity_bytes):
 
 # ---------- Arranque y apagado ----------
 
+def parse_addresses(text):
+    """"sp1:7000, sp2:7000" -> ["sp1:7000", "sp2:7000"]."""
+    addresses = []
+    for item in text.split(","):
+        item = item.strip()
+        if item != "":
+            addresses.append(item)
+    return addresses
+
+
 def install_stop_handlers(stop_event):
     """
     Hace que SIGTERM (docker compose stop) y Ctrl+C (SIGINT) activen stop_event
@@ -283,7 +307,7 @@ def install_stop_handlers(stop_event):
     signal.signal(signal.SIGINT, request_stop)
 
 
-def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory, tls_dir, block_key_path):
+def serve(peer_id, host, port, superpeer_addresses, capacity_bytes, data_directory, tls_dir, block_key_path):
     # La ÚNICA línea que elige dónde y cómo se guardan los bloques: en disco (DiskBlockStorage crea la
     # carpeta y borra temporales a medias), cifrados con AES-256-GCM (cifrado en reposo). La clave va
     # en otro lugar que los bloques: si estuvieran juntos, quien se lleve el disco se lleva las dos cosas
@@ -304,15 +328,25 @@ def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory
     stop_event = threading.Event()
     install_stop_handlers(stop_event)
 
-    # 3. Registro y heartbeats en este hilo, hasta la orden de apagar.
+    # 3. Registro y heartbeats: un hilo por superpeer, hasta la orden de apagar
     peer_info = pb.PeerInfo(peer_id=peer_id, address=announced_address, capacity_bytes=capacity_bytes)
-    membership = SuperpeerMembership(superpeer_address, peer_info, data_directory, stop_event, tls_dir,
-                                     on_superpeer_public_key=peer_servicer.use_superpeer_public_key)
+    memberships = []
+    for superpeer_address in superpeer_addresses:
+        membership = SuperpeerMembership(superpeer_address, peer_info, data_directory, stop_event, tls_dir,
+                                         on_superpeer_public_key=peer_servicer.use_superpeer_public_key)
+        thread = threading.Thread(target=membership.run, name=f"membership-{superpeer_address}", daemon=True)
+        thread.start()
+        memberships.append(membership)
     try:
-        membership.run()
+        # El hilo principal solo espera la orden de apagar. Con sleep y no con stop_event.wait():
+        # el manejador de SIGTERM corre en este hilo, y si llegara mientras wait() tiene tomado el
+        # lock interno del evento, stop_event.set() lo esperaría para siempre
+        while not stop_event.is_set():
+            time.sleep(0.5)
     finally:
         print(f"peer {peer_id} stopping")
-        membership.close()
+        for membership in memberships:
+            membership.close()
         server.stop(grace=2).wait()      # termina las llamadas en curso, máximo 2 s
 
 
@@ -325,7 +359,7 @@ if __name__ == "__main__":
                              "peer1 en Docker Compose, la IP de la VPN en las VMs")
     parser.add_argument("--port", type=int, default=7100)
     parser.add_argument("--superpeer", default="sp1:7000",
-                        help="dirección del superpeer, p. ej. sp1:7000")
+                        help="dirección de cada superpeer, separadas por comas, p. ej. sp1:7000,sp2:7000")
     parser.add_argument("--capacity-mb", type=int, default=1024,
                         help="espacio que este peer ofrece para bloques")
     parser.add_argument("--data-dir", default="/data",
@@ -341,7 +375,7 @@ if __name__ == "__main__":
     serve(peer_id=arguments.id,
           host=arguments.host,
           port=arguments.port,
-          superpeer_address=arguments.superpeer,
+          superpeer_addresses=parse_addresses(arguments.superpeer),
           capacity_bytes=arguments.capacity_mb * BYTES_PER_MB,
           data_directory=arguments.data_dir,
           tls_dir=arguments.tls_dir,
