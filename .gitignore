@@ -8,3 +8,6 @@ dfsha_pb2_grpc.py
 
 # Credenciales locales (ver .env.example)
 .env
+
+# Certificados y claves TLS (se generan con make_certs.py)
+certs/

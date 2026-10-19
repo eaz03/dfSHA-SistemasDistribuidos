@@ -23,12 +23,18 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
+from auth_interceptor import RoleInterceptor
+from tls import secure_channel, server_credentials
 
 REGISTER_TIMEOUT_SECONDS = 5.0      # mayor que el Ping que hace el superpeer durante el registro (2 s)
 HEARTBEAT_TIMEOUT_SECONDS = 2.0
 FIRST_RETRY_DELAY_SECONDS = 1.0     # espera entre intentos de registro: 1, 2, 4, 8, 10, 10... segundos
 MAX_RETRY_DELAY_SECONDS = 10.0
 BYTES_PER_MB = 1024 * 1024
+# Métodos que solo puede llamar un superpeer (según su certificado): nadie más debe poder dar órdenes al peer
+SUPERPEER_ONLY_METHODS = {
+    "/dfsha.Peer/Ping": "superpeer",
+}
 
 
 # ---------- Servidor: lo que el peer responde ----------
@@ -57,12 +63,12 @@ class SuperpeerMembership:
     Todo corre en el hilo que llama a run(); stop_event lo detiene.
     """
 
-    def __init__(self, superpeer_address, peer_info, data_directory, stop_event):
+    def __init__(self, superpeer_address, peer_info, data_directory, stop_event, tls_dir):
         self.superpeer_address = superpeer_address
         self.peer_info = peer_info                   # pb.PeerInfo: id, dirección anunciada, capacidad
         self.data_directory = data_directory
         self.stop_event = stop_event
-        self.channel = grpc.insecure_channel(superpeer_address)   # gRPC reconecta solo si el superpeer se reinicia
+        self.channel = secure_channel(superpeer_address, tls_dir)   # mTLS; gRPC reconecta solo si el superpeer se reinicia
         self.superpeer_stub = rpc.SuperpeerStub(self.channel)
         self.heartbeat_interval_seconds = None       # lo fija el superpeer en la respuesta a RegisterPeer
         self.superpeer_reachable = True              # solo para no repetir el mismo mensaje en cada heartbeat fallido
@@ -184,13 +190,14 @@ def install_stop_handlers(stop_event):
     signal.signal(signal.SIGINT, request_stop)
 
 
-def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory):
+def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory, tls_dir):
     os.makedirs(data_directory, exist_ok=True)
 
     # 1. Servidor primero: el superpeer le hará Ping durante el registro.
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16),
+                         interceptors=[RoleInterceptor(SUPERPEER_ONLY_METHODS)])
     rpc.add_PeerServicer_to_server(Peer(peer_id, data_directory), server)
-    server.add_insecure_port(f"[::]:{port}")
+    server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS
     server.start()
     announced_address = f"{host}:{port}"
     print(f"peer {peer_id} listening on :{port}, announced as {announced_address}, "
@@ -202,7 +209,7 @@ def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory
 
     # 3. Registro y heartbeats en este hilo, hasta la orden de apagar.
     peer_info = pb.PeerInfo(peer_id=peer_id, address=announced_address, capacity_bytes=capacity_bytes)
-    membership = SuperpeerMembership(superpeer_address, peer_info, data_directory, stop_event)
+    membership = SuperpeerMembership(superpeer_address, peer_info, data_directory, stop_event, tls_dir)
     try:
         membership.run()
     finally:
@@ -225,6 +232,8 @@ if __name__ == "__main__":
                         help="espacio que este peer ofrece para bloques")
     parser.add_argument("--data-dir", default="/data",
                         help="carpeta donde se guardan los bloques")
+    parser.add_argument("--tls-dir", required=True,
+                        help="carpeta con node.key, node.crt y ca.crt de este peer (make_certs.py)")
     arguments = parser.parse_args()
     if arguments.capacity_mb <= 0:
         parser.error("--capacity-mb must be positive")
@@ -234,4 +243,5 @@ if __name__ == "__main__":
           port=arguments.port,
           superpeer_address=arguments.superpeer,
           capacity_bytes=arguments.capacity_mb * BYTES_PER_MB,
-          data_directory=arguments.data_dir)
+          data_directory=arguments.data_dir,
+          tls_dir=arguments.tls_dir)

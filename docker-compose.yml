@@ -1,13 +1,13 @@
 services:
   sp1:
     build: .
-    command: python superpeer.py --id sp1 --port 7000 --demo
+    command: python superpeer.py --id sp1 --port 7000 --demo --tls-dir certs/sp1
     # /data: usuarios (users.json). /keys: clave que firma los tokens, aparte de los datos
     volumes: [".:/app", "sp1-data:/data", "sp1-keys:/keys"]
 
   peer1:
     build: .
-    command: python peer.py --id peer1 --host peer1 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data
+    command: python peer.py --id peer1 --host peer1 --port 7100 --superpeer sp1:7000 --capacity-mb 1024 --data-dir /data --tls-dir certs/peer1
     volumes: [".:/app", "peer1-data:/data"]
     depends_on: [sp1]
 
@@ -16,7 +16,8 @@ services:
     command: python mount.py sp1:7000 /mnt/dfsha
     volumes: [".:/app"]
     # Credenciales del montaje: se leen del archivo .env (fuera de git; ver .env.example)
-    environment: ["DFSHA_DEBUG=1", "DFSHA_USER=${DFSHA_USER}", "DFSHA_PASSWORD=${DFSHA_PASSWORD}"]
+    environment: ["DFSHA_DEBUG=1", "DFSHA_USER=${DFSHA_USER}", "DFSHA_PASSWORD=${DFSHA_PASSWORD}",
+                  "DFSHA_TLS_DIR=certs/client"]
     devices: ["/dev/fuse"]
     cap_add: ["SYS_ADMIN"]
     security_opt: ["apparmor:unconfined"]

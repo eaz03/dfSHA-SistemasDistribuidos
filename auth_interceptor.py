@@ -1,10 +1,12 @@
 """
-Autenticación del lado del servidor: un interceptor de gRPC que verifica el token de cada llamada
-antes de que llegue al handler, como un portero.
+Control de acceso del lado del servidor: interceptores de gRPC que revisan cada llamada antes de
+que llegue al handler, como porteros.
 
-Es seguro por defecto: todo RPC queda protegido, incluidos los que se agreguen después, salvo los
-de una lista corta y explícita de métodos públicos (p. ej. Login). Si cada handler revisara el
-token por su cuenta, bastaría con olvidarlo en uno para dejar un agujero.
+  - AuthenticationInterceptor: usuarios. Exige un token válido en toda llamada, salvo en una lista
+    corta y explícita de métodos públicos (p. ej. Login). Es seguro por defecto: los RPC que se
+    agreguen después quedan protegidos sin que nadie tenga que acordarse.
+  - RoleInterceptor: nodos. Ciertos métodos solo se aceptan de un rol de nodo, según el certificado
+    de quien llama (mTLS): p. ej. solo un peer puede registrarse como peer.
 
 Los handlers obtienen el usuario autenticado con current_user(), que reemplaza al DEMO_USER fijo.
 """
@@ -14,6 +16,7 @@ import contextvars
 import grpc
 
 from auth_tokens import InvalidTokenError
+from tls import caller_role
 
 AUTHORIZATION_METADATA_KEY = "authorization"     # gRPC exige las llaves de metadata en minúscula
 BEARER_PREFIX = "Bearer "                        # mismo formato que el encabezado Authorization de HTTP
@@ -56,7 +59,39 @@ class AuthenticationInterceptor(grpc.ServerInterceptor):
         if handler is None or handler_call_details.method in self._public_methods:
             return handler                         # método inexistente (gRPC responde UNIMPLEMENTED) o público
         token = _bearer_token(handler_call_details.invocation_metadata)
-        return _with_authentication(handler, token, self._token_verifier)
+
+        def authenticate(context):
+            if token is None:
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing token: call Login first")
+            try:
+                return self._token_verifier.verify(token)      # el usuario: queda en current_user()
+            except InvalidTokenError as error:
+                context.abort(grpc.StatusCode.UNAUTHENTICATED, str(error))   # abort lanza: no sigue
+
+        return _guarded(handler, authenticate)
+
+
+class RoleInterceptor(grpc.ServerInterceptor):
+    """Acepta los métodos de method_roles solo si el certificado de quien llama tiene el rol indicado."""
+
+    def __init__(self, method_roles):
+        """method_roles: {nombre completo del método: rol requerido}, p. ej. {"/dfsha.Superpeer/RegisterPeer": "peer"}."""
+        self._method_roles = dict(method_roles)
+
+    def intercept_service(self, continuation, handler_call_details):
+        handler = continuation(handler_call_details)
+        required_role = self._method_roles.get(handler_call_details.method)
+        if handler is None or required_role is None:
+            return handler                         # método sin restricción de rol
+
+        def check_role(context):
+            role = caller_role(context)
+            if role != required_role:
+                context.abort(grpc.StatusCode.PERMISSION_DENIED,
+                              f"only a {required_role} can call this method (caller is: {role})")
+            return None                            # un nodo no es un usuario: current_user() no cambia
+
+        return _guarded(handler, check_role)
 
 
 def _bearer_token(metadata):
@@ -67,40 +102,40 @@ def _bearer_token(metadata):
     return None
 
 
-def _with_authentication(handler, token, token_verifier):
+def _guarded(handler, check):
     """
-    Devuelve una copia de handler cuya función primero verifica el token (y si no sirve, termina
-    la llamada con UNAUTHENTICATED sin ejecutar el handler) y luego deja el usuario en current_user().
-    La verificación va dentro de la función envuelta, y no en intercept_service, porque solo ahí
+    Devuelve una copia de handler cuya función primero llama check(context): check puede terminar
+    la llamada con context.abort (y el handler no se ejecuta), y si devuelve un usuario, este queda
+    en current_user() mientras dura la llamada.
+    La revisión va dentro de la función envuelta, y no en intercept_service, porque solo ahí
     está el 'context' con el que se puede abortar la llamada.
     """
-    def authenticate(context):
-        if token is None:
-            context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing token: call Login first")
-        try:
-            return token_verifier.verify(token)
-        except InvalidTokenError as error:
-            context.abort(grpc.StatusCode.UNAUTHENTICATED, str(error))   # abort lanza: no sigue
-
     def call_returning_one_response(behavior):
-        def authenticated_behavior(request_or_iterator, context):
-            context_token = _current_user.set(authenticate(context))
+        def guarded_behavior(request_or_iterator, context):
+            user = check(context)
+            if user is None:
+                return behavior(request_or_iterator, context)
+            context_token = _current_user.set(user)
             try:
                 return behavior(request_or_iterator, context)
             finally:
                 _current_user.reset(context_token)    # el hilo vuelve al pool sin usuario
-        return authenticated_behavior
+        return guarded_behavior
 
     def call_returning_a_stream(behavior):
         # Si el handler devuelve un stream de respuestas, el usuario debe seguir puesto mientras
         # se recorre, no solo mientras se crea: por eso es un generador
-        def authenticated_behavior(request_or_iterator, context):
-            context_token = _current_user.set(authenticate(context))
+        def guarded_behavior(request_or_iterator, context):
+            user = check(context)
+            if user is None:
+                yield from behavior(request_or_iterator, context)
+                return
+            context_token = _current_user.set(user)
             try:
                 yield from behavior(request_or_iterator, context)
             finally:
                 _current_user.reset(context_token)
-        return authenticated_behavior
+        return guarded_behavior
 
     # Un RPC tiene una de cuatro formas según si recibe y devuelve un mensaje o un stream
     if handler.unary_unary:

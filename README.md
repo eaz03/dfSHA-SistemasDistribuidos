@@ -44,15 +44,19 @@ docker compose build
 #    No está en el repositorio: se genera a partir de dfsha.proto.
 docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha.proto
 
-# 3. Crear un usuario (pide la contraseña sin mostrarla) y darle sus credenciales al montaje.
+# 3. Generar los certificados TLS: una CA propia y uno por nodo (sp1, peer1, client).
+#    Toda comunicación va cifrada y con certificado en ambas puntas (mTLS). certs/ no va a git.
+docker compose run --rm sp1 python make_certs.py dev
+
+# 4. Crear un usuario (pide la contraseña sin mostrarla) y darle sus credenciales al montaje.
 #    --demo crea archivos de ejemplo para el usuario "demo".
 docker compose run --rm sp1 python manage_users.py add demo
 cp .env.example .env                   # y poner en .env la contraseña elegida (.env no va a git)
 
-# 4. Arrancar el superpeer, el peer y el cliente
+# 5. Arrancar el superpeer, el peer y el cliente
 docker compose up -d
 
-# 5. Comprobar que arrancaron
+# 6. Comprobar que arrancaron
 docker compose ps                      # sp1 y client en estado "Up"
 docker compose logs sp1                # superpeer sp1 listening on :7000 (demo data)
 docker compose logs client             # connected to: sp1:7000  (o "login failed": revisar .env)
@@ -94,6 +98,21 @@ DFSHA_USER=sofi DFSHA_PASSWORD=... docker compose up -d client
 Los usuarios (`/data/users.json`, solo hashes de las contraseñas) y la clave que firma los tokens
 (`/keys/token.key`) viven en volúmenes de `sp1`; `docker compose down -v` los borra.
 
+### Certificados
+
+Todos los nodos confían en la CA de `certs/`, no en una lista de nodos. Para agregar un nodo basta
+con emitirle un certificado (los demás no cambian ni se reinician) y arrancarlo con `--tls-dir certs/<nombre>`:
+
+```bash
+docker compose run --rm sp1 python make_certs.py issue peer peer2 --san peer2
+docker compose run --rm sp1 python make_certs.py issue peer peer3 --san 10.8.0.7   # en una VM: su IP de la VPN
+```
+
+El rol del certificado (`superpeer`, `peer`, `client`) limita qué puede hacer cada nodo: p. ej. solo
+un `peer` puede registrarse en el superpeer y solo un `superpeer` puede dar órdenes a un peer.
+Los certificados de los nodos duran 90 días y la CA un año. En una VM se copian solo
+`node.key`, `node.crt` y `ca.crt` de su carpeta: `ca.key` nunca sale de donde se emiten.
+
 ## Desarrollo
 
 | Si se modifica... | Hay que ejecutar |
@@ -113,6 +132,7 @@ Opciones útiles:
 |---|---|
 | `permission denied ... docker.sock` | El usuario no está en el grupo `docker`, o falta abrir una terminal nueva después de agregarlo |
 | `ModuleNotFoundError: dfsha_pb2` | Falta el paso 2 (generar el código gRPC) |
+| `FileNotFoundError: .../node.key` al arrancar | Falta el paso 3 (generar los certificados) |
 | El cliente se reinicia con `no superpeer reachable` | `sp1` no arrancó: revisar `docker compose logs sp1` |
 | `fuse: device not found` u `Operation not permitted` al montar | Faltan `devices`, `cap_add` o `security_opt` del servicio `client` en `docker-compose.yml` |
 | `Transport endpoint is not connected` | `mount.py` terminó con error: `docker compose restart client` |
@@ -121,5 +141,5 @@ Opciones útiles:
 ## Limitaciones actuales
 
 - Todavía no se guarda contenido: `cat`, `cp` y escribir en un archivo fallan. Los archivos existen solo como entradas del registro, con tamaño 0.
-- Un solo superpeer. Hay login con usuario/contraseña y tokens, pero las comunicaciones todavía no van cifradas (TLS pendiente).
+- Un solo superpeer. Hay login con usuario/contraseña, tokens y mTLS en todos los canales; el cifrado de los bloques en disco está listo (`EncryptedBlockStorage`) pero el peer todavía no guarda bloques.
 - El registro está en memoria: se reinicia junto con el superpeer.

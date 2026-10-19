@@ -7,14 +7,16 @@ import grpc
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
 from auth_client import BearerTokenInterceptor, LoginSession
+from tls import secure_channel
 
 class DFSClient:
     """Se comunica con los superpeers por gRPC"""
 
-    def __init__(self, superpeers, username, password, timeout=5):
+    def __init__(self, superpeers, username, password, tls_dir, timeout=5):
         self.superpeers = list(superpeers)
         self.username = username
         self.password = password
+        self.tls_dir = tls_dir             # certificado de esta máquina cliente (mTLS)
         self.timeout = timeout
         self.addr = None
         self.channel = None
@@ -28,8 +30,7 @@ class DFSClient:
         otro superpeer, porque todos conocen los mismos usuarios.
         """
         for addr in self.superpeers:
-            # AÑADIR TLS
-            channel = grpc.insecure_channel(addr)
+            channel = secure_channel(addr, self.tls_dir)
             try:
                 grpc.channel_ready_future(channel).result(timeout=self.timeout)
             except grpc.FutureTimeoutError:

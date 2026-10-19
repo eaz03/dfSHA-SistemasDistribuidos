@@ -145,9 +145,10 @@ def main():
     password = os.environ.get("DFSHA_PASSWORD")
     if not username or not password:
         sys.exit("set DFSHA_USER and DFSHA_PASSWORD (see .env.example)")
+    tls_dir = os.environ.get("DFSHA_TLS_DIR", "certs/client")    # certificado de esta máquina (make_certs.py)
 
     try:
-        client = DFSClient([sys.argv[1]], username, password)
+        client = DFSClient([sys.argv[1]], username, password, tls_dir)
     except grpc.RpcError as rpc_error:
         sys.exit(f"login failed: {rpc_error.details()}")
     print(f"connected to: {client.addr}")

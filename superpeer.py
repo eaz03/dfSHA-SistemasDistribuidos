@@ -7,20 +7,27 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
-from auth_interceptor import AuthenticationInterceptor, current_user
+from auth_interceptor import AuthenticationInterceptor, RoleInterceptor, current_user
 from auth_tokens import TokenIssuer, TokenVerifier, load_or_create_signing_key
 from errors import translate_file_system_errors_to_grpc
 from dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
 from json_user_store import JsonUserStore
 from peer_tracker import PeerTracker
+from tls import secure_channel, server_credentials
 
 DEMO_USER = "demo"                  # dueño de las entradas de ejemplo de --demo (crear su cuenta con manage_users.py)
-# RPCs que no piden token: Login (es el que lo entrega) y los de los peers, que no son usuarios
-# (se autenticarán con certificados, mTLS). Todos los demás, incluidos los que se agreguen, lo exigen.
+# RPCs que no piden token: Login (es el que lo entrega) y los de los peers, que no son usuarios.
+# Todos los demás, incluidos los que se agreguen, lo exigen.
 PUBLIC_METHODS = {
     "/dfsha.Superpeer/Login",
     "/dfsha.Superpeer/RegisterPeer",
     "/dfsha.Superpeer/Heartbeat",
+}
+# Los de los peers se protegen con su certificado (mTLS): solo un nodo con rol "peer" puede llamarlos,
+# así nadie más puede registrar un peer falso para recibir bloques ajenos
+NODE_METHOD_ROLES = {
+    "/dfsha.Superpeer/RegisterPeer": "peer",
+    "/dfsha.Superpeer/Heartbeat": "peer",
 }
 HEARTBEAT_INTERVAL_SECONDS = 3.0    # cada cuánto envían heartbeat los peers; muertos tras 3 perdidos (9 s)
 PING_TIMEOUT_SECONDS = 2.0          # cuánto espera RegisterPeer la respuesta del peer
@@ -30,8 +37,9 @@ def clean_path(path):
     return posixpath.normpath("/" + path.lstrip("/"))
 
 class Superpeer(rpc.SuperpeerServicer):
-    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer):
+    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer, tls_dir):
         self.node_id = node_id
+        self.tls_dir = tls_dir             # certificado de este superpeer, para hablar con los peers
         self.registry = registry           # cualquier implementación de registry.Registry
         self.peer_tracker = peer_tracker   # tabla de peers: quién está, dónde, si sigue vivo
         self.user_store = user_store       # cualquier implementación de user_store.UserStore
@@ -127,7 +135,7 @@ class Superpeer(rpc.SuperpeerServicer):
         if capacity_bytes <= 0:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                           f"peer {peer_id}: capacity_bytes must be positive")
-        if not peer_answers_ping(address):
+        if not peer_answers_ping(address, self.tls_dir):
             context.abort(grpc.StatusCode.UNAVAILABLE,
                           f"peer {peer_id}: no answer to Ping at {address}")
 
@@ -160,12 +168,13 @@ class Superpeer(rpc.SuperpeerServicer):
         return pb.PeerList(peers=peer_statuses)
 
 
-def peer_answers_ping(address):
+def peer_answers_ping(address, tls_dir):
     """
     True si en address hay un servidor Peer que responde Ping antes de PING_TIMEOUT_SECONDS.
     Abre una conexión solo para esta comprobación; el 'with' la cierra al salir.
+    Con mTLS además comprueba que en esa dirección haya un nodo con certificado de la CA para ese nombre.
     """
-    with grpc.insecure_channel(address) as channel:
+    with secure_channel(address, tls_dir) as channel:
         peer_stub = rpc.PeerStub(channel)
         try:
             peer_stub.Ping(pb.Empty(), timeout=PING_TIMEOUT_SECONDS)
@@ -187,7 +196,7 @@ def seed_demo_entries(registry):
     registry.create_file(DEMO_USER, "/readme.md", now)
 
 
-def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds):
+def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir):
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
 
@@ -206,11 +215,12 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds):
     token_verifier = TokenVerifier(signing_key.public_key())
     user_store = JsonUserStore(users_file)    # para cambiar de almacén de usuarios, se cambia esta línea (y el import)
 
-    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer)
-    authentication = AuthenticationInterceptor(token_verifier, PUBLIC_METHODS)
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), interceptors=[authentication])
+    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir)
+    # Primero el rol del nodo (certificado) y luego el usuario (token)
+    interceptors = [RoleInterceptor(NODE_METHOD_ROLES), AuthenticationInterceptor(token_verifier, PUBLIC_METHODS)]
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), interceptors=interceptors)
     rpc.add_SuperpeerServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
+    server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS: no hay puerto sin cifrar
     server.start()
     print(f"superpeer {node_id} listening on :{port}" + (" (demo data)" if demo else ""))
     server.wait_for_termination()
@@ -223,5 +233,6 @@ if __name__ == "__main__":
     p.add_argument("--users-file", default="/data/users.json", help="usuarios (crear con manage_users.py)")
     p.add_argument("--token-key", default="/keys/token.key", help="clave privada que firma los tokens")
     p.add_argument("--token-ttl", type=float, default=3600, help="segundos que dura un token de sesión")
+    p.add_argument("--tls-dir", required=True, help="carpeta con node.key, node.crt y ca.crt (make_certs.py)")
     a = p.parse_args()
-    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl)
+    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir)
