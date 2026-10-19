@@ -1,6 +1,5 @@
 import argparse
 import posixpath
-from concurrent import futures
 import threading
 import time
 
@@ -19,7 +18,7 @@ from dfsha.superpeer import replication_monitor
 from dfsha.superpeer.replication_monitor import ReplicationMonitor
 from dfsha.superpeer.persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
 from dfsha.superpeer.registry import BlockInfo
-from dfsha.common.tls import secure_channel, server_credentials
+from dfsha.common.tls import create_secure_server, secure_channel
 
 DEMO_USER = "demo"                  # dueño de las entradas de ejemplo de --demo (crear su cuenta con manage_users.py)
 # RPCs que no piden token: Login (es el que lo entrega) y los de los peers, que no son usuarios.
@@ -357,9 +356,8 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
     servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner)
     # Primero el rol del nodo (certificado) y luego el usuario (token)
     interceptors = [RoleInterceptor(NODE_METHOD_ROLES), AuthenticationInterceptor(token_verifier, PUBLIC_METHODS)]
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), interceptors=interceptors)
+    server = create_secure_server(port, tls_dir, interceptors=interceptors)   # solo mTLS: no hay puerto sin cifrar
     rpc.add_SuperpeerServicer_to_server(servicer, server)
-    server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS: no hay puerto sin cifrar
     server.start()
     print(f"superpeer {node_id} listening on :{port}" + (" (demo data)" if demo else ""))
     server.wait_for_termination()

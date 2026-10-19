@@ -21,7 +21,6 @@ import os
 import shutil
 import signal
 import threading
-from concurrent import futures
 
 import grpc
 
@@ -33,7 +32,7 @@ from dfsha.peer.disk_block_storage import DiskBlockStorage
 from dfsha.peer.encrypted_block_storage import EncryptedBlockStorage
 from dfsha.common.errors import translate_file_system_errors_to_grpc
 from dfsha.common.key_files import load_or_create_secret_key
-from dfsha.common.tls import caller_role, secure_channel, server_credentials
+from dfsha.common.tls import caller_role, create_secure_server, secure_channel
 
 REGISTER_TIMEOUT_SECONDS = 5.0      # mayor que el Ping que hace el superpeer durante el registro (2 s)
 HEARTBEAT_TIMEOUT_SECONDS = 2.0
@@ -293,11 +292,9 @@ def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory
     # 1. Servidor primero: el superpeer le hará Ping durante el registro.
     #    gRPC acepta mensajes de hasta 4 MB por defecto: alcanza para bloques de 1 MiB.
     #    Con bloques más grandes habría que subir ese límite o enviar el bloque en streaming.
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16),
-                         interceptors=[RoleInterceptor(SUPERPEER_ONLY_METHODS)])
+    server = create_secure_server(port, tls_dir, interceptors=[RoleInterceptor(SUPERPEER_ONLY_METHODS)])   # solo mTLS
     peer_servicer = Peer(peer_id, block_storage, tls_dir)
     rpc.add_PeerServicer_to_server(peer_servicer, server)
-    server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS
     server.start()
     announced_address = f"{host}:{port}"
     print(f"peer {peer_id} listening on :{port}, announced as {announced_address}, "

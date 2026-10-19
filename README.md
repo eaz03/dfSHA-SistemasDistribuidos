@@ -3,10 +3,12 @@
 Sistema de archivos distribuido (DFS) basado en bloques, organizado como una red P2P con superpeers.
 Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 
-> **Estado: preliminar.** Funciona el espacio de nombres completo a través de un montaje FUSE:
-> `ls`, `cd`, `stat`, `find`, `mkdir`, `rmdir`, `rm`, `mv`, `touch`.
-> Los peers se registran en el superpeer y envían heartbeats; el superpeer detecta cuándo caen.
-> La lectura y escritura del contenido de los archivos (bloques en los peers) está en desarrollo.
+> **Estado: funcional con un superpeer.** DFSha se monta con FUSE y se usa como una carpeta común:
+> espacio de nombres (`ls`, `cd`, `mkdir`, `rm`, `mv`...), lectura (`cat`, `less`, `cp` desde el montaje)
+> y escritura (`cp` hacia el montaje, `>`, `>>`, editores). Los archivos se parten en bloques de 1 MiB con
+> 2 réplicas en los peers: si un peer cae, se lee de la otra réplica y el superpeer copia sus bloques a
+> otro peer. Todo va con login, mTLS y bloques cifrados en disco.
+> Faltan varios superpeers (federación y failover) y el despliegue en VMs: ver [docs/PLAN.md](docs/PLAN.md).
 
 ## Estructura
 
@@ -16,7 +18,7 @@ dfsha/                  el código del sistema: un subpaquete por tipo de nodo
   common/               lo que comparten los nodos: errores, mTLS, tokens JWT, claves, interceptores
   superpeer/            superpeer (python -m dfsha.superpeer): registro de metadatos, tabla de peers, usuarios
   peer/                 peer (python -m dfsha.peer): guarda y entrega bloques (cifrados en disco)
-  client/               cliente: DFSClient, montaje FUSE (python -m dfsha.client.mount) y CLI sin FUSE
+  client/               cliente: DFSClient, montaje FUSE (python -m dfsha.client.mount) y CLI de respaldo sin FUSE
 tools/                  administración: certificados, usuarios, estado de los peers (python -m tools.<nombre>)
 tests/                  pruebas de integración sobre los contenedores (python -m tests.<nombre>)
 docs/                   arquitectura, plan de trabajo y guía de despliegue
@@ -30,7 +32,7 @@ Todo se ejecuta **desde la raíz del repositorio** con `python -m`, para que los
 |---|---|
 | `dfsha/client/mount.py` | Monta DFSha como una carpeta común (FUSE): cualquier programa (`ls`, `cd`, `mkdir`...) la usa sin saber que es remota |
 | `dfsha/client/client.py` | `DFSClient`: habla con el superpeer (metadatos) y directo con los peers (bloques) |
-| `dfsha/client/dfs_cli.py` | Temporal: subir (`put`), bajar (`get`) y ver los bloques (`blocks`) de un archivo sin FUSE |
+| `dfsha/client/dfs_cli.py` | Respaldo sin FUSE: subir (`put`), bajar (`get`) y ver los bloques y sus réplicas (`blocks`). Para cuando el montaje falla, para diagnosticar si un problema es de FUSE o del resto del sistema, y para las pruebas (`test_mount.py`) |
 | `dfsha/superpeer/__main__.py` | Servidor gRPC del superpeer: login, operaciones del registro, registro de peers, plan y ubicación de bloques |
 | `dfsha/superpeer/registry.py` | Contrato (interfaz) del registro de metadatos; `dict_registry.py` lo implementa en memoria |
 | `dfsha/superpeer/persistent_registry.py` | Guarda el registro en disco: log de operaciones (con `fsync`) + snapshot; al arrancar lo reconstruye |
@@ -43,11 +45,15 @@ Todo se ejecuta **desde la raíz del repositorio** con `python -m`, para que los
 | `dfsha/common/errors.py` | Errores de sistema de archivos y su traducción entre capas (registro, red, kernel) |
 | `dfsha/common/tls.py`, `auth_tokens.py`, `auth_interceptor.py` | mTLS, tokens JWT (sesión y permisos de bloque) e interceptores de acceso |
 
-Flujo de una operación, por ejemplo `ls /mnt/dfsha/docs`:
+Flujo de las operaciones (`ls /mnt/dfsha/docs`, `cat`, `cp` hacia el montaje):
 
 ```
-ls -> kernel (VFS/FUSE) -> mount.py -> client.py -> gRPC -> superpeer.py -> registro
+ls  -> kernel (VFS/FUSE) -> mount.py -> client.py -> gRPC -> superpeer -> registro
+cat -> mount.py -> superpeer: en qué peers está cada bloque -> peers: los bloques (varios en paralelo)
+cp  -> mount.py: copia local del archivo -> al cerrarlo: superpeer (plan) -> peers (bloques) -> superpeer (commit)
 ```
+
+Los bytes nunca pasan por el superpeer: solo guarda metadatos.
 
 ## Requisitos
 
@@ -102,7 +108,15 @@ touch notas.txt
 mv notas.txt proyectos/
 ls -R
 rm -r proyectos
+cp /app/README.md .                    # subir (en /app está la carpeta del proyecto)
+head README.md                         # leer
+echo "hola" > saludo.txt               # escribir; >> agrega al final
+sed -i 's/hola/chao/' saludo.txt       # editar (también vi o nano, si se instalan en la imagen)
+cp README.md /tmp/                     # bajar
 ```
+
+Lo que se escribe se sube a los peers al cerrar el archivo: desde ahí lo ven los demás (como en NFS).
+Si la subida falla, el archivo conserva su versión anterior y el error aparece al cerrar (p. ej. `cp: failed to close`).
 
 Para detener todo: `docker compose down`. El registro del superpeer es persistente (log de operaciones +
 snapshot en el volumen `sp1-data`): sobrevive a reinicios y a `down`; `docker compose down -v` lo borra.
@@ -151,6 +165,8 @@ docker compose logs -f peer1                        # registro, reintentos y re-
 python3 -m tests.test_peers                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
 docker compose exec client python -m tests.test_peer_blocks  # API de bloques de peer1, peer2 y peer3 (~5 s)
 docker compose exec client python -m tests.test_superpeer_blocks  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
+python3 -m tests.test_mount                               # montaje: lectura, escritura, archivos abiertos y peers caídos (en WSL, ~30 s; deja todo corriendo)
+# Respaldo sin FUSE (dfs_cli): si el montaje falla, o para ver en qué peers quedó cada bloque
 docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md   # subir (en /app está la carpeta del proyecto)
 docker compose exec client python -m dfsha.client.dfs_cli blocks /readme.md               # bloques y en qué peers está cada uno
 docker compose exec client python -m dfsha.client.dfs_cli get /readme.md /tmp/readme.md   # bajar
@@ -179,10 +195,18 @@ Opciones útiles:
 | El cliente se reinicia con `no superpeer reachable` | `sp1` no arrancó: revisar `docker compose logs sp1` |
 | `fuse: device not found` u `Operation not permitted` al montar | Faltan `devices`, `cap_add` o `security_opt` del servicio `client` en `docker-compose.yml` |
 | `Transport endpoint is not connected` | `mount.py` terminó con error: `docker compose restart client` |
-| `Input/output error` en cualquier comando | El superpeer no responde, o la operación todavía no está implementada (ver limitaciones) |
+| `Input/output error` en cualquier comando | El superpeer no responde |
+| `Input/output error` al cerrar un archivo (`cp: failed to close`) | Ningún peer pudo guardar algún bloque (p. ej. peers recién caídos); el archivo conserva su versión anterior |
+| `No space left on device` al escribir | No hay peers vivos con espacio (p. ej. recién arrancados y todavía sin registrarse): esperar unos segundos y revisar `tools.peers_status` |
+| `No data available` al leer | Ninguna réplica de algún bloque responde: revisar `tools.peers_status` |
 
 ## Limitaciones actuales
 
-- Todavía no se guarda contenido: `cat`, `cp` y escribir en un archivo fallan. Los archivos existen solo como entradas del registro, con tamaño 0.
-- Un solo superpeer. Hay login con usuario/contraseña, tokens y mTLS en todos los canales, y los peers guardan los bloques cifrados (AES-256-GCM).
-- El registro se guarda en disco en un solo superpeer: todavía no se replica a otros superpeers.
+- Un solo superpeer: su registro se guarda en disco (log + snapshot) pero todavía no se replica a otros superpeers, y el cliente no tiene a cuál cambiarse si cae.
+- Consistencia close-to-open: otro cliente ve los cambios de un archivo cuando quien lo escribe lo cierra. Si dos lo escriben a la vez, queda la versión del último que cierra.
+- Los errores de subida llegan al cerrar el archivo: `cp`, Python y los editores los muestran, pero `echo ... >` de bash no revisa el cierre.
+- Mientras un archivo está abierto para escribir, el cliente guarda una copia completa en su `/tmp`.
+- No se guardan permisos, dueño ni fechas: `chmod`, `chown` y `touch -d` se aceptan sin efecto, y todo aparece como del usuario que montó (644 o 755).
+- `df` no muestra el espacio de DFSha y `du` muestra 0.
+- El montaje atiende una operación a la vez (un solo hilo).
+- `rm` de un archivo abierto lo deja visible como `.fuse_hidden...` hasta que se cierra (comportamiento de libfuse).

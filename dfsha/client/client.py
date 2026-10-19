@@ -197,7 +197,7 @@ class DFSClient:
                     written_bytes += len(block_data)
         return written_bytes
 
-    # ---------- Escritura (mínima: la usa dfs_cli.py hasta que el mount escriba) ----------
+    # ---------- Escritura (la usa el mount al cerrar un archivo: sube su copia local completa) ----------
 
     def write_block(self, block_location, data):
         """
