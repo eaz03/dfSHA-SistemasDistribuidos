@@ -10,9 +10,10 @@ from dfsha.proto import dfsha_pb2_grpc as rpc
 from dfsha.common.auth_interceptor import AuthenticationInterceptor, RoleInterceptor, current_user
 from dfsha.common.auth_tokens import TokenIssuer, TokenVerifier, load_or_create_signing_key
 from dfsha.common.errors import FileSystemError, translate_file_system_errors_to_grpc
-from dfsha.superpeer.dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
+from dfsha.superpeer.dict_registry import DEFAULT_PENDING_PLAN_TTL_SECONDS, DictRegistry      # la ÚNICA línea que elige la implementación del registro
 from dfsha.superpeer.json_user_store import JsonUserStore
 from dfsha.superpeer.peer_tracker import PeerTracker
+from dfsha.superpeer.block_cleaner import DEFAULT_GRACE_SECONDS, DEFAULT_INTERVAL_SECONDS, BlockCleaner
 from dfsha.superpeer.persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
 from dfsha.superpeer.registry import BlockInfo
 from dfsha.common.tls import secure_channel, server_credentials
@@ -41,9 +42,10 @@ def clean_path(path):
     return posixpath.normpath("/" + path.lstrip("/"))
 
 class Superpeer(rpc.SuperpeerServicer):
-    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer, tls_dir):
+    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner):
         self.node_id = node_id
         self.tls_dir = tls_dir             # certificado de este superpeer, para hablar con los peers
+        self.block_cleaner = block_cleaner # borra de los peers los bloques que quedan obsoletos
         self.registry = registry           # cualquier implementación de registry.Registry
         self.peer_tracker = peer_tracker   # tabla de peers: quién está, dónde, si sigue vivo
         self.user_store = user_store       # cualquier implementación de user_store.UserStore
@@ -109,7 +111,8 @@ class Superpeer(rpc.SuperpeerServicer):
         """RPC: borra un archivo. Lo usa unlink (comando rm) en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.delete_file(current_user(), path, now=time.time())
+            obsolete_blocks = self.registry.delete_file(current_user(), path, now=time.time())
+        self.block_cleaner.schedule(obsolete_blocks)     # sus bloques ya no los usa nadie
         return pb.Empty()
 
     def Rename(self, request, context):
@@ -117,7 +120,8 @@ class Superpeer(rpc.SuperpeerServicer):
         source_path = clean_path(request.source_path)
         destination_path = clean_path(request.destination_path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.rename(current_user(), source_path, destination_path, now=time.time())
+            obsolete_blocks = self.registry.rename(current_user(), source_path, destination_path, now=time.time())
+        self.block_cleaner.schedule(obsolete_blocks)     # los del archivo reemplazado en el destino, si había uno
         return pb.Empty()
 
     # ---------- RPC: membresía de peers ----------
@@ -216,8 +220,9 @@ class Superpeer(rpc.SuperpeerServicer):
 
         with translate_file_system_errors_to_grpc(context):
             obsolete_blocks = self.registry.commit_file(current_user(), path, request.size, blocks, now=time.time())
-        # Siguiente subtarea: entregar obsolete_blocks (los de la versión anterior) al limpiador,
-        # que los borrará de sus peers con DeleteBlock. Por ahora quedan huérfanos en los peers.
+        # Los de la versión anterior: se borran de sus peers después del período de gracia, para que
+        # quien estaba leyendo la versión vieja alcance a terminar
+        self.block_cleaner.schedule(obsolete_blocks)
         return pb.Empty()
 
     # ---------- Ayudantes de bloques ----------
@@ -291,7 +296,8 @@ def seed_demo_entries(registry):
     registry.create_file(DEMO_USER, "/readme.md", now)
 
 
-def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir, registry_dir, snapshot_every):
+def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir, registry_dir, snapshot_every,
+          deletion_grace_seconds, cleaner_interval_seconds, pending_plan_ttl_seconds):
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
 
@@ -301,7 +307,8 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
 
     # El registro en memoria, envuelto por la persistencia: cada modificación queda en un log en
     # registry_dir y al arrancar se reconstruye desde ahí (para cambiar de registro, se cambia esta línea)
-    registry = PersistentRegistry(DictRegistry(live_peers=peers_available_for_blocks, block_size=BLOCK_SIZE_BYTES),
+    registry = PersistentRegistry(DictRegistry(live_peers=peers_available_for_blocks, block_size=BLOCK_SIZE_BYTES,
+                                               pending_plan_ttl_seconds=pending_plan_ttl_seconds),
                                   registry_dir, snapshot_every)
     if demo:
         seed_demo_entries(registry)
@@ -313,7 +320,20 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
     token_verifier = TokenVerifier(signing_key.public_key())
     user_store = JsonUserStore(users_file)    # para cambiar de almacén de usuarios, se cambia esta línea (y el import)
 
-    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir)
+    # Limpiador: borra en los peers los bloques obsoletos y los de planes vencidos, en segundo plano.
+    # Habla con los peers con el certificado de este superpeer: solo un superpeer puede usar DeleteBlock
+    peer_stubs = {}                            # dirección -> PeerStub: un canal por peer, reutilizado
+
+    def delete_block_on_peer(address, block_id):
+        if address not in peer_stubs:
+            peer_stubs[address] = rpc.PeerStub(secure_channel(address, tls_dir))
+        peer_stubs[address].DeleteBlock(pb.BlockRequest(block_id=block_id), timeout=PING_TIMEOUT_SECONDS)
+
+    block_cleaner = BlockCleaner(peer_tracker, delete_block_on_peer, registry,
+                                 grace_seconds=deletion_grace_seconds, interval_seconds=cleaner_interval_seconds)
+    block_cleaner.start()
+
+    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner)
     # Primero el rol del nodo (certificado) y luego el usuario (token)
     interceptors = [RoleInterceptor(NODE_METHOD_ROLES), AuthenticationInterceptor(token_verifier, PUBLIC_METHODS)]
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), interceptors=interceptors)
@@ -335,5 +355,12 @@ if __name__ == "__main__":
     p.add_argument("--registry-dir", default="/data/registry", help="log y snapshot del registro")
     p.add_argument("--snapshot-every", type=int, default=DEFAULT_SNAPSHOT_EVERY,
                    help="cada cuántas modificaciones se toma un snapshot y se vacía el log")
+    p.add_argument("--deletion-grace", type=float, default=DEFAULT_GRACE_SECONDS,
+                   help="segundos que espera un bloque obsoleto antes de borrarse (deja terminar lecturas en curso)")
+    p.add_argument("--cleaner-interval", type=float, default=DEFAULT_INTERVAL_SECONDS,
+                   help="cada cuántos segundos el limpiador revisa su cola")
+    p.add_argument("--pending-plan-ttl", type=float, default=DEFAULT_PENDING_PLAN_TTL_SECONDS,
+                   help="segundos que vive un plan de escritura sin commit")
     a = p.parse_args()
-    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir, a.registry_dir, a.snapshot_every)
+    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir, a.registry_dir, a.snapshot_every,
+          a.deletion_grace, a.cleaner_interval, a.pending_plan_ttl)
