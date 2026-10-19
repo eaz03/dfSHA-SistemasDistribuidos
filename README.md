@@ -173,6 +173,18 @@ python3 -m tests.integration.test_peers      # registro, caída y regreso de un 
 python3 -m tests.integration.test_failures   # persistencia, réplica alternativa, re-replicación, limpieza (~2 min)
 ```
 
+## Mediciones
+
+Los scripts de `benchmarks/` miden transferencia, metadatos, costo de la seguridad y disponibilidad;
+los resultados y su análisis están en [benchmarks/RESULTADOS.md](benchmarks/RESULTADOS.md).
+
+```bash
+docker compose exec client python -m benchmarks.bench_transfer     # put/get por tamaño y paralelismo (~7 min)
+docker compose exec client python -m benchmarks.bench_metadata     # operaciones de metadatos por segundo
+docker compose run --rm sp1 python -m benchmarks.bench_internals   # cifrado, TLS y snapshots
+python3 -m benchmarks.bench_availability                           # detección, re-replicación, reinicio (~3 min)
+```
+
 ## Desarrollo
 
 | Si se modifica... | Hay que ejecutar |
