@@ -20,6 +20,8 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
+from auth_client import authenticated_superpeer_stub, credentials_from_environment
+from tls import secure_channel
 from errors import errno_from_rpc_error
 
 BLOCK_SIZE_BYTES = 1024 * 1024
@@ -70,13 +72,16 @@ def main():
     parser = argparse.ArgumentParser(description="Prueba de WriteBlock/ReadBlock/DeleteBlock en los peers")
     parser.add_argument("--peers", default="peer1:7100,peer2:7100,peer3:7100",
                         help="direcciones de los peers, separadas por comas")
-    parser.add_argument("--superpeer", default="localhost:7000")
+    parser.add_argument("--superpeer", default="sp1:7000")
+    # La prueba usa DeleteBlock, que un peer solo acepta de un superpeer: habla con los peers con el
+    # certificado de sp1 (en Docker local todos los certificados están en certs/)
+    parser.add_argument("--peer-tls-dir", default="certs/sp1")
     arguments = parser.parse_args()
 
     peer_addresses = arguments.peers.split(",")
     peer_stubs = {}
     for peer_address in peer_addresses:
-        peer_stubs[peer_address] = rpc.PeerStub(grpc.insecure_channel(peer_address))
+        peer_stubs[peer_address] = rpc.PeerStub(secure_channel(peer_address, arguments.peer_tls_dir))
     first_address = peer_addresses[0]
     first_peer = peer_stubs[first_address]
     blocks_to_clean_up = []        # (dirección, block_id) escritos durante la prueba
@@ -131,7 +136,7 @@ def main():
     report("6. same block on every peer", all_replicas_match, f"{len(peer_addresses)} replicas of {short_hash(replica_data)}")
 
     # 7. El espacio libre que informa el heartbeat baja al guardar bloques
-    superpeer_stub = rpc.SuperpeerStub(grpc.insecure_channel(arguments.superpeer))
+    superpeer_stub = authenticated_superpeer_stub(arguments.superpeer, *credentials_from_environment())   # ListPeers pide token
     first_peer_id = first_address.split(":")[0]           # en Compose, el nombre es el peer_id
     free_before = free_bytes_of(superpeer_stub, first_peer_id)
     for block_number in range(3):

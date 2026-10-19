@@ -4,7 +4,8 @@ Prueba del paso 1 (conexión peer <-> superpeer) sobre los contenedores de Docke
 Se ejecuta en WSL (no dentro de un contenedor), desde cualquier carpeta:
   python3 test_peers.py
 Solo usa la biblioteca estándar de Python: controla los contenedores con 'docker compose'
-y consulta la tabla de peers ejecutando peers_status.py dentro de sp1.
+y consulta la tabla de peers ejecutando peers_status.py dentro del contenedor client
+(que tiene las credenciales y el certificado de cliente, porque ListPeers pide token).
 Tarda alrededor de un minuto. Al terminar deja sp1 y peer1 corriendo.
 
 Casos:
@@ -50,7 +51,7 @@ def peer_state(peer_id):
       'unreachable'     -> no se pudo consultar al superpeer (p. ej. se está reiniciando)
     """
     try:
-        output = compose("exec", "-T", SUPERPEER_SERVICE, "python", "peers_status.py", "--json")
+        output = compose("exec", "-T", "client", "python", "peers_status.py", "--json")
     except RuntimeError:
         return "unreachable"
     peers = json.loads(output)

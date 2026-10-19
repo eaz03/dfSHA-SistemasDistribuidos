@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1
-RUN pip install --no-cache-dir grpcio grpcio-tools fusepy
+RUN pip install --no-cache-dir grpcio grpcio-tools fusepy pyjwt cryptography
 WORKDIR /app
 COPY . .
 RUN mkdir -p /mnt/dfsha

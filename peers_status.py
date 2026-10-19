@@ -2,27 +2,25 @@
 Muestra la tabla de peers del superpeer (RPC ListPeers).
 
 Uso, desde WSL en la carpeta del proyecto:
-  docker compose exec sp1 python peers_status.py           tabla legible
-  docker compose exec sp1 python peers_status.py --json    JSON, para scripts (lo usa test_peers.py)
+  docker compose exec client python peers_status.py           tabla legible
+  docker compose exec client python peers_status.py --json    JSON, para scripts (lo usa test_peers.py)
+ListPeers pide token: usa las credenciales del montaje (DFSHA_USER, DFSHA_PASSWORD, DFSHA_TLS_DIR).
 """
 
 import argparse
 import json
 
-import grpc
-
 import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
+from auth_client import authenticated_superpeer_stub, credentials_from_environment
 
 BYTES_PER_MB = 1024 * 1024
 
 
 def fetch_peers(superpeer_address):
     """Pide ListPeers al superpeer y devuelve la lista de pb.PeerStatus."""
-    with grpc.insecure_channel(superpeer_address) as channel:
-        superpeer_stub = rpc.SuperpeerStub(channel)
-        peer_list = superpeer_stub.ListPeers(pb.Empty(), timeout=3)
-    return peer_list.peers
+    username, password, tls_dir = credentials_from_environment()
+    superpeer_stub = authenticated_superpeer_stub(superpeer_address, username, password, tls_dir)
+    return superpeer_stub.ListPeers(pb.Empty(), timeout=3).peers
 
 
 def print_table(peers):
@@ -59,8 +57,7 @@ def print_json(peers):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tabla de peers del superpeer")
-    parser.add_argument("--superpeer", default="localhost:7000",
-                        help="dirección del superpeer (por defecto el de este mismo contenedor)")
+    parser.add_argument("--superpeer", default="sp1:7000", help="dirección del superpeer")
     parser.add_argument("--json", action="store_true", help="salida en JSON")
     arguments = parser.parse_args()
 

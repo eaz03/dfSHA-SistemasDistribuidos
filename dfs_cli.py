@@ -18,6 +18,8 @@ import sys
 
 import grpc
 
+from auth_client import credentials_from_environment
+
 from client import DFSClient
 from errors import FileSystemError, errno_from_rpc_error
 
@@ -86,7 +88,8 @@ def main():
     arguments = parser.parse_args()
 
     try:
-        client = DFSClient(arguments.superpeer.split(","))
+        username, password, tls_dir = credentials_from_environment()     # las mismas que el montaje
+        client = DFSClient(arguments.superpeer.split(","), username, password, tls_dir)
         if arguments.command == "put":
             command_put(client, arguments.local_path, arguments.remote_path)
         elif arguments.command == "get":

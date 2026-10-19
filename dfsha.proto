@@ -4,6 +4,11 @@ package dfsha;
 
 // ======================= Superpeer =======================
 service Superpeer {
+  // ----- Cliente -> Superpeer: autenticación -----
+  // Login es el único RPC de cliente que no lleva token. Los demás lo envían en la metadata
+  // "authorization: Bearer <token>", así que sus mensajes no cambian.
+  rpc Login(LoginRequest) returns (LoginReply);      // mount al arrancar: usuario/contraseña -> token
+
   // ----- Cliente -> Superpeer: espacio de nombres (comentario: operación del mount que lo usa) -----
   rpc Stat(PathRequest) returns (Attr);              // getattr: ls, cd, stat
   rpc ListDir(PathRequest) returns (DirListing);     // readdir: ls, find
@@ -38,6 +43,18 @@ service Peer {
 // ======================= Mensajes comunes =======================
 
 message Empty {}      // respuesta sin datos: el éxito es simplemente no recibir un error
+
+// ======================= Autenticación =======================
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;           // solo viaja aquí, y debe ir por un canal cifrado (TLS)
+}
+
+message LoginReply {
+  string token = 1;                  // JWT firmado por el superpeer; se adjunta en cada RPC
+  double expires_in_seconds = 2;     // cuánto dura; al vencer, el cliente vuelve a hacer Login
+}
 
 // ======================= Espacio de nombres =======================
 

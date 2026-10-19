@@ -4,7 +4,7 @@ haciendo a mano lo que después hará el cliente: pedir el plan, subir cada bloq
 hacer commit y volver a leer el archivo con las ubicaciones que entrega el superpeer.
 
 Se ejecuta dentro de un contenedor, desde WSL, con los peers levantados:
-  docker compose exec sp1 python test_superpeer_blocks.py
+  docker compose exec client python test_superpeer_blocks.py
 Al terminar borra los archivos y los bloques que creó.
 """
 
@@ -19,6 +19,8 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
+from auth_client import authenticated_superpeer_stub, credentials_from_environment
+from tls import secure_channel
 from errors import errno_from_rpc_error
 
 MEBIBYTE = 1024 * 1024
@@ -46,14 +48,18 @@ def errno_name_of(rpc_call):
 
 
 class PeerConnections:
-    """Un canal por dirección de peer, creado la primera vez que se usa."""
+    """
+    Un canal por dirección de peer, creado la primera vez que se usa.
+    Con el certificado de sp1: la limpieza usa DeleteBlock, que un peer solo acepta de un superpeer.
+    """
 
-    def __init__(self):
+    def __init__(self, tls_dir):
         self._stubs = {}
+        self._tls_dir = tls_dir
 
     def stub(self, address):
         if address not in self._stubs:
-            self._stubs[address] = rpc.PeerStub(grpc.insecure_channel(address))
+            self._stubs[address] = rpc.PeerStub(secure_channel(address, self._tls_dir))
         return self._stubs[address]
 
 
@@ -99,11 +105,12 @@ def short_hash(data):
 
 def main():
     parser = argparse.ArgumentParser(description="Prueba de AllocateBlocks/CommitFile/GetBlockLocations")
-    parser.add_argument("--superpeer", default="localhost:7000")
+    parser.add_argument("--superpeer", default="sp1:7000")
+    parser.add_argument("--peer-tls-dir", default="certs/sp1")
     arguments = parser.parse_args()
 
-    superpeer = rpc.SuperpeerStub(grpc.insecure_channel(arguments.superpeer))
-    peers = PeerConnections()
+    superpeer = authenticated_superpeer_stub(arguments.superpeer, *credentials_from_environment())
+    peers = PeerConnections(arguments.peer_tls_dir)
     test_directory = "/test-blocks-" + uuid.uuid4().hex[:6]
     superpeer.MakeDir(pb.PathRequest(path=test_directory), timeout=RPC_TIMEOUT_SECONDS)
     big_path = test_directory + "/big.bin"

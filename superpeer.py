@@ -7,12 +7,29 @@ import grpc
 
 import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
+from auth_interceptor import AuthenticationInterceptor, RoleInterceptor, current_user
+from auth_tokens import TokenIssuer, TokenVerifier, load_or_create_signing_key
 from errors import translate_file_system_errors_to_grpc
 from dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
+from json_user_store import JsonUserStore
 from peer_tracker import PeerTracker
 from registry import BlockInfo
+from tls import secure_channel, server_credentials
 
-DEMO_USER = "demo"
+DEMO_USER = "demo"                  # dueño de las entradas de ejemplo de --demo (crear su cuenta con manage_users.py)
+# RPCs que no piden token: Login (es el que lo entrega) y los de los peers, que no son usuarios.
+# Todos los demás, incluidos los que se agreguen, lo exigen.
+PUBLIC_METHODS = {
+    "/dfsha.Superpeer/Login",
+    "/dfsha.Superpeer/RegisterPeer",
+    "/dfsha.Superpeer/Heartbeat",
+}
+# Los de los peers se protegen con su certificado (mTLS): solo un nodo con rol "peer" puede llamarlos,
+# así nadie más puede registrar un peer falso para recibir bloques ajenos
+NODE_METHOD_ROLES = {
+    "/dfsha.Superpeer/RegisterPeer": "peer",
+    "/dfsha.Superpeer/Heartbeat": "peer",
+}
 HEARTBEAT_INTERVAL_SECONDS = 3.0    # cada cuánto envían heartbeat los peers; muertos tras 3 perdidos (9 s)
 PING_TIMEOUT_SECONDS = 2.0          # cuánto espera RegisterPeer la respuesta del peer
 BLOCK_SIZE_BYTES = 1024 * 1024      # 1 MiB por bloque: el registro parte los archivos con este tamaño,
@@ -23,11 +40,13 @@ def clean_path(path):
     return posixpath.normpath("/" + path.lstrip("/"))
 
 class Superpeer(rpc.SuperpeerServicer):
-    def __init__(self, node_id, registry, peer_tracker):
+    def __init__(self, node_id, registry, peer_tracker, user_store, token_issuer, tls_dir):
         self.node_id = node_id
+        self.tls_dir = tls_dir             # certificado de este superpeer, para hablar con los peers
         self.registry = registry           # cualquier implementación de registry.Registry
         self.peer_tracker = peer_tracker   # tabla de peers: quién está, dónde, si sigue vivo
-        self.tokens = {}                   # token -> user (placeholder authentication)
+        self.user_store = user_store       # cualquier implementación de user_store.UserStore
+        self.token_issuer = token_issuer   # emite el token de sesión después de un Login correcto
 
     # ---------- RPC ----------
     # Patrón de todos los handlers:
@@ -37,47 +56,59 @@ class Superpeer(rpc.SuperpeerServicer):
     #   3. Responder.
     # El superpeer no sabe cómo está guardado el registro, ni si necesita locks:
     # eso lo resuelve la implementación de Registry.
+    # El usuario sale de current_user(): el interceptor ya verificó su token antes de llegar aquí.
+
+    def Login(self, request, context):
+        """
+        RPC: usuario y contraseña -> token de sesión. Lo usa el cliente al conectarse y cuando su token vence.
+        Si falla responde lo mismo sin importar si el usuario no existe o la contraseña es incorrecta,
+        para no revelar qué usuarios existen.
+        """
+        if not self.user_store.authenticate(request.username, request.password):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, "invalid username or password")
+        token = self.token_issuer.issue(request.username)
+        return pb.LoginReply(token=token, expires_in_seconds=self.token_issuer.ttl_seconds)
 
     def Stat(self, request, context):
         """RPC: metadatos de un path. Lo usa getattr en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            entry = self.registry.stat(DEMO_USER, path)          # CAMBIAR A USUARIO REAL
+            entry = self.registry.stat(current_user(), path)
         return pb.Attr(is_dir=entry.is_dir, size=entry.size, mtime=entry.mtime)
 
     def ListDir(self, request, context):
         """RPC: nombres de los hijos directos de un directorio. Lo usa readdir en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            child_names = self.registry.list_directory(DEMO_USER, path)
+            child_names = self.registry.list_directory(current_user(), path)
         return pb.DirListing(names=child_names)
 
     def MakeDir(self, request, context):
         """RPC: crea un directorio vacío. Lo usa mkdir en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.make_directory(DEMO_USER, path, now=time.time())
+            self.registry.make_directory(current_user(), path, now=time.time())
         return pb.Empty()
 
     def RemoveDir(self, request, context):
         """RPC: borra un directorio vacío. Lo usa rmdir en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.remove_directory(DEMO_USER, path, now=time.time())
+            self.registry.remove_directory(current_user(), path, now=time.time())
         return pb.Empty()
 
     def CreateFile(self, request, context):
         """RPC: crea un archivo vacío. Lo usa create (touch, primer paso de cp) en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.create_file(DEMO_USER, path, now=time.time())
+            self.registry.create_file(current_user(), path, now=time.time())
         return pb.Empty()
 
     def Delete(self, request, context):
         """RPC: borra un archivo. Lo usa unlink (comando rm) en el mount."""
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.delete_file(DEMO_USER, path, now=time.time())
+            self.registry.delete_file(current_user(), path, now=time.time())
         return pb.Empty()
 
     def Rename(self, request, context):
@@ -85,7 +116,7 @@ class Superpeer(rpc.SuperpeerServicer):
         source_path = clean_path(request.source_path)
         destination_path = clean_path(request.destination_path)
         with translate_file_system_errors_to_grpc(context):
-            self.registry.rename(DEMO_USER, source_path, destination_path, now=time.time())
+            self.registry.rename(current_user(), source_path, destination_path, now=time.time())
         return pb.Empty()
 
     # ---------- RPC: membresía de peers ----------
@@ -107,7 +138,7 @@ class Superpeer(rpc.SuperpeerServicer):
         if capacity_bytes <= 0:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT,
                           f"peer {peer_id}: capacity_bytes must be positive")
-        if not peer_answers_ping(address):
+        if not peer_answers_ping(address, self.tls_dir):
             context.abort(grpc.StatusCode.UNAVAILABLE,
                           f"peer {peer_id}: no answer to Ping at {address}")
 
@@ -151,7 +182,7 @@ class Superpeer(rpc.SuperpeerServicer):
         """
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            blocks = self.registry.get_block_locations(DEMO_USER, path)
+            blocks = self.registry.get_block_locations(current_user(), path)
         return self._block_list_reply(blocks)
 
     def AllocateBlocks(self, request, context):
@@ -161,7 +192,7 @@ class Superpeer(rpc.SuperpeerServicer):
         """
         path = clean_path(request.path)
         with translate_file_system_errors_to_grpc(context):
-            blocks = self.registry.allocate_blocks(DEMO_USER, path, request.size)
+            blocks = self.registry.allocate_blocks(current_user(), path, request.size)
         return self._block_list_reply(blocks)
 
     def CommitFile(self, request, context):
@@ -180,7 +211,7 @@ class Superpeer(rpc.SuperpeerServicer):
             blocks.append(block)
 
         with translate_file_system_errors_to_grpc(context):
-            obsolete_blocks = self.registry.commit_file(DEMO_USER, path, request.size, blocks, now=time.time())
+            obsolete_blocks = self.registry.commit_file(current_user(), path, request.size, blocks, now=time.time())
         # Siguiente subtarea: entregar obsolete_blocks (los de la versión anterior) al limpiador,
         # que los borrará de sus peers con DeleteBlock. Por ahora quedan huérfanos en los peers.
         return pb.Empty()
@@ -216,12 +247,13 @@ class Superpeer(rpc.SuperpeerServicer):
         return alive_replicas + dead_replicas
 
 
-def peer_answers_ping(address):
+def peer_answers_ping(address, tls_dir):
     """
     True si en address hay un servidor Peer que responde Ping antes de PING_TIMEOUT_SECONDS.
     Abre una conexión solo para esta comprobación; el 'with' la cierra al salir.
+    Con mTLS además comprueba que en esa dirección haya un nodo con certificado de la CA para ese nombre.
     """
-    with grpc.insecure_channel(address) as channel:
+    with secure_channel(address, tls_dir) as channel:
         peer_stub = rpc.PeerStub(channel)
         try:
             peer_stub.Ping(pb.Empty(), timeout=PING_TIMEOUT_SECONDS)
@@ -243,7 +275,7 @@ def seed_demo_entries(registry):
     registry.create_file(DEMO_USER, "/readme.md", now)
 
 
-def serve(node_id, port, demo):
+def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir):
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
 
@@ -255,10 +287,20 @@ def serve(node_id, port, demo):
                             block_size=BLOCK_SIZE_BYTES)
     if demo:
         seed_demo_entries(registry)
-    servicer = Superpeer(node_id, registry, peer_tracker)
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+
+    # Autenticación: la clave privada firma los tokens y la pública los verifica.
+    # La clave se crea la primera vez y vive en un volumen aparte (/keys), nunca en el repositorio
+    signing_key = load_or_create_signing_key(token_key_file)
+    token_issuer = TokenIssuer(signing_key, ttl_seconds=token_ttl_seconds)
+    token_verifier = TokenVerifier(signing_key.public_key())
+    user_store = JsonUserStore(users_file)    # para cambiar de almacén de usuarios, se cambia esta línea (y el import)
+
+    servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir)
+    # Primero el rol del nodo (certificado) y luego el usuario (token)
+    interceptors = [RoleInterceptor(NODE_METHOD_ROLES), AuthenticationInterceptor(token_verifier, PUBLIC_METHODS)]
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), interceptors=interceptors)
     rpc.add_SuperpeerServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
+    server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS: no hay puerto sin cifrar
     server.start()
     print(f"superpeer {node_id} listening on :{port}" + (" (demo data)" if demo else ""))
     server.wait_for_termination()
@@ -268,5 +310,9 @@ if __name__ == "__main__":
     p.add_argument("--id", default="sp1")
     p.add_argument("--port", type=int, default=7000)
     p.add_argument("--demo", action="store_true")
+    p.add_argument("--users-file", default="/data/users.json", help="usuarios (crear con manage_users.py)")
+    p.add_argument("--token-key", default="/keys/token.key", help="clave privada que firma los tokens")
+    p.add_argument("--token-ttl", type=float, default=3600, help="segundos que dura un token de sesión")
+    p.add_argument("--tls-dir", required=True, help="carpeta con node.key, node.crt y ca.crt (make_certs.py)")
     a = p.parse_args()
-    serve(a.id, a.port, a.demo)
+    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir)
