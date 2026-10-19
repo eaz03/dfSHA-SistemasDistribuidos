@@ -19,6 +19,7 @@ Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 | `peer.py` | Peer: se registra en el superpeer, envía heartbeats y (próximamente) guarda bloques |
 | `registry.py` | Contrato (interfaz) del registro de metadatos |
 | `dict_registry.py` | Implementación actual del registro: diccionarios en memoria |
+| `persistent_registry.py` | Envuelve al registro y lo guarda en disco: log de operaciones (con `fsync`) + snapshot; al arrancar lo reconstruye |
 | `errors.py` | Errores de sistema de archivos y su traducción entre capas (registro, red, kernel) |
 | `dfsha.proto` | Contrato de comunicación gRPC: servicios `Superpeer` y `Peer` |
 | `peers_status.py` | Muestra la tabla de peers del superpeer |
@@ -90,7 +91,8 @@ ls -R
 rm -r proyectos
 ```
 
-Para detener todo: `docker compose down`. El registro vive en memoria, así que se pierde al detener el superpeer.
+Para detener todo: `docker compose down`. El registro del superpeer es persistente (log de operaciones +
+snapshot en el volumen `sp1-data`): sobrevive a reinicios y a `down`; `docker compose down -v` lo borra.
 
 ### Usuarios
 
@@ -169,5 +171,5 @@ Opciones útiles:
 ## Limitaciones actuales
 
 - Todavía no se guarda contenido: `cat`, `cp` y escribir en un archivo fallan. Los archivos existen solo como entradas del registro, con tamaño 0.
-- Un solo superpeer. Hay login con usuario/contraseña, tokens y mTLS en todos los canales; el cifrado de los bloques en disco está listo (`EncryptedBlockStorage`) pero el peer todavía no guarda bloques.
-- El registro está en memoria: se reinicia junto con el superpeer.
+- Un solo superpeer. Hay login con usuario/contraseña, tokens y mTLS en todos los canales, y los peers guardan los bloques cifrados (AES-256-GCM).
+- El registro se guarda en disco en un solo superpeer: todavía no se replica a otros superpeers.

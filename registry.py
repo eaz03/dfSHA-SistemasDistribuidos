@@ -165,6 +165,30 @@ class Registry(ABC):
         Errores: ENOENT si path no existe; EISDIR si es un directorio.
         """
 
+    # ---------- Persistencia y replicación ----------
+    # Lo usa PersistentRegistry (y más adelante la sincronización entre superpeers) para
+    # guardar el registro y reconstruirlo repitiendo las operaciones de un log.
+
+    @abstractmethod
+    def replay_commit_file(self, user, path, size, blocks, now):
+        """
+        Aplica un commit_file que ya se validó cuando ocurrió (viene de un log): no exige que los
+        bloques estén pendientes, porque los planes no sobreviven a un reinicio.
+        Devuelve los BlockInfo obsoletos, igual que commit_file.
+        Errores: ENOENT si path no existe; EISDIR si es un directorio.
+        """
+
+    @abstractmethod
+    def export_state(self):
+        """
+        Devuelve todo el espacio de nombres (archivos, directorios y bloques) como datos simples,
+        guardables en JSON. No incluye los planes pendientes: son estado temporal.
+        """
+
+    @abstractmethod
+    def import_state(self, state):
+        """Reemplaza todo el espacio de nombres por state (lo devuelto por export_state)."""
+
     @abstractmethod
     def expire_pending_blocks(self):
         """

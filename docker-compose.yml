@@ -2,7 +2,8 @@ services:
   sp1:
     build: .
     command: python superpeer.py --id sp1 --port 7000 --demo --tls-dir certs/sp1
-    # /data: usuarios (users.json). /keys: clave que firma los tokens, aparte de los datos
+    # /data: usuarios (users.json) y registro persistente (registry/: log + snapshot).
+    # /keys: clave que firma los tokens, aparte de los datos
     volumes: [".:/app", "sp1-data:/data", "sp1-keys:/keys"]
 
   # Peers: mismo código, cada uno con su id, su nombre en la red, su certificado (--tls-dir),
@@ -39,7 +40,7 @@ services:
     restart: on-failure
 
 volumes:           # sobreviven a docker compose down, se borran con down -v
-  sp1-data:        # usuarios del superpeer
+  sp1-data:        # usuarios y registro persistente (log + snapshot) del superpeer
   sp1-keys:        # clave privada de los tokens: separada de los datos
   peer1-data:      # bloques (cifrados) de cada peer
   peer2-data:

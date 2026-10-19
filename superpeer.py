@@ -9,10 +9,11 @@ import dfsha_pb2 as pb
 import dfsha_pb2_grpc as rpc
 from auth_interceptor import AuthenticationInterceptor, RoleInterceptor, current_user
 from auth_tokens import TokenIssuer, TokenVerifier, load_or_create_signing_key
-from errors import translate_file_system_errors_to_grpc
+from errors import FileSystemError, translate_file_system_errors_to_grpc
 from dict_registry import DictRegistry      # la ÚNICA línea que elige la implementación del registro
 from json_user_store import JsonUserStore
 from peer_tracker import PeerTracker
+from persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
 from registry import BlockInfo
 from tls import secure_channel, server_credentials
 
@@ -266,7 +267,13 @@ def seed_demo_entries(registry):
     """
     Entradas de ejemplo para arrancar con --demo, creadas con las mismas operaciones
     que usan los clientes. Los archivos quedan vacíos (tamaño 0): no tienen contenido real.
+    Como el registro es persistente, al reiniciar ya existen: en ese caso no se crean de nuevo.
     """
+    try:
+        registry.stat(DEMO_USER, "/docs")
+        return                                     # ya se crearon en un arranque anterior
+    except FileSystemError:
+        pass
     now = time.time()
     registry.make_directory(DEMO_USER, "/docs", now)
     registry.create_file(DEMO_USER, "/docs/report.pdf", now)
@@ -275,7 +282,7 @@ def seed_demo_entries(registry):
     registry.create_file(DEMO_USER, "/readme.md", now)
 
 
-def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir):
+def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir, registry_dir, snapshot_every):
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
 
@@ -283,8 +290,10 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
         """peer_id de los peers vivos donde cabe al menos un bloque más. El registro la llama en cada allocate_blocks."""
         return peer_tracker.alive_peer_ids_with_free_bytes(BLOCK_SIZE_BYTES)
 
-    registry = DictRegistry(live_peers=peers_available_for_blocks,    # para cambiar de registro, se cambia esta línea (y el import)
-                            block_size=BLOCK_SIZE_BYTES)
+    # El registro en memoria, envuelto por la persistencia: cada modificación queda en un log en
+    # registry_dir y al arrancar se reconstruye desde ahí (para cambiar de registro, se cambia esta línea)
+    registry = PersistentRegistry(DictRegistry(live_peers=peers_available_for_blocks, block_size=BLOCK_SIZE_BYTES),
+                                  registry_dir, snapshot_every)
     if demo:
         seed_demo_entries(registry)
 
@@ -314,5 +323,8 @@ if __name__ == "__main__":
     p.add_argument("--token-key", default="/keys/token.key", help="clave privada que firma los tokens")
     p.add_argument("--token-ttl", type=float, default=3600, help="segundos que dura un token de sesión")
     p.add_argument("--tls-dir", required=True, help="carpeta con node.key, node.crt y ca.crt (make_certs.py)")
+    p.add_argument("--registry-dir", default="/data/registry", help="log y snapshot del registro")
+    p.add_argument("--snapshot-every", type=int, default=DEFAULT_SNAPSHOT_EVERY,
+                   help="cada cuántas modificaciones se toma un snapshot y se vacía el log")
     a = p.parse_args()
-    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir)
+    serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir, a.registry_dir, a.snapshot_every)
