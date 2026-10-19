@@ -189,6 +189,27 @@ class Registry(ABC):
     def import_state(self, state):
         """Reemplaza todo el espacio de nombres por state (lo devuelto por export_state)."""
 
+    # ---------- Re-replicación ----------
+    # Un bloque queda con menos réplicas de las acordadas si un peer muere o si se escribió cuando
+    # había pocos peers. El monitor de réplicas del superpeer los busca y les agrega copias.
+
+    @abstractmethod
+    def under_replicated_blocks(self, available_peer_ids):
+        """
+        Devuelve (usuario, path, BlockInfo) de cada bloque de un archivo actual que tiene menos de
+        replication_factor réplicas en available_peer_ids (los peers que el superpeer da por presentes),
+        pero al menos una: sin ninguna no hay de dónde copiarlo.
+        """
+
+    @abstractmethod
+    def add_block_replica(self, user, path, block_id, peer_id):
+        """
+        Anota que el bloque block_id de path también tiene una réplica en peer_id (el monitor ya lo copió).
+        Si peer_id ya estaba, no hace nada. No cambia el mtime: el contenido del archivo es el mismo.
+        Errores: ENOENT si path ya no existe, es un directorio, o el bloque ya no es parte del archivo
+                 (se sobrescribió o se borró mientras se copiaba): esa copia sobra.
+        """
+
     @abstractmethod
     def expire_pending_blocks(self):
         """

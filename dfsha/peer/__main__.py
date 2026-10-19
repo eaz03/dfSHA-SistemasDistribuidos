@@ -44,7 +44,9 @@ BYTES_PER_MB = 1024 * 1024
 SUPERPEER_ONLY_METHODS = {
     "/dfsha.Peer/Ping": "superpeer",
     "/dfsha.Peer/DeleteBlock": "superpeer",     # si no, cualquier cliente podría borrar bloques ajenos
+    "/dfsha.Peer/ReplicateBlock": "superpeer",  # las copias de re-replicación las ordena solo el superpeer
 }
+REPLICATE_TIMEOUT_SECONDS = 10      # leer un bloque (hasta 1 MiB) desde otro peer
 
 
 # ---------- Servidor: lo que el peer responde ----------
@@ -61,9 +63,10 @@ class Peer(rpc.PeerServicer):
     el peer no sabe a qué usuario pertenece cada bloque, el superpeer sí.
     """
 
-    def __init__(self, peer_id, block_storage):
+    def __init__(self, peer_id, block_storage, tls_dir):
         self.peer_id = peer_id
         self.block_storage = block_storage       # cualquier implementación de block_storage.BlockStorage
+        self.tls_dir = tls_dir                   # su certificado: para leer de otros peers al re-replicar
         self.token_verifier = None               # llega con la clave pública del superpeer al registrarse
 
     def use_superpeer_public_key(self, public_key_pem):
@@ -111,6 +114,27 @@ class Peer(rpc.PeerServicer):
         with translate_file_system_errors_to_grpc(context):
             data = self.block_storage.read_block(request.block_id)
         return pb.BlockData(data=data)
+
+    def ReplicateBlock(self, request, context):
+        """
+        RPC: copia un bloque desde otro peer y lo guarda aquí. Lo ordena el superpeer cuando un bloque
+        perdió réplicas (re-replicación). Los bytes van de peer a peer, sin pasar por el superpeer.
+        Al origen se le presenta el permiso de lectura que vino en la orden, como haría un cliente;
+        aquí se guarda cifrado con la clave de este peer (cada peer cifra con la suya).
+        """
+        source_peer = rpc.PeerStub(secure_channel(request.source_address, self.tls_dir))
+        read_request = pb.BlockRequest(block_id=request.block_id, access_token=request.access_token)
+        try:
+            data = source_peer.ReadBlock(read_request, timeout=REPLICATE_TIMEOUT_SECONDS).data
+        except grpc.RpcError as rpc_error:
+            context.abort(grpc.StatusCode.UNAVAILABLE,
+                          f"cannot read block from {request.source_address}: {rpc_error.code().name} {rpc_error.details()}")
+        if len(data) != request.size:
+            context.abort(grpc.StatusCode.DATA_LOSS,
+                          f"source returned {len(data)} bytes, expected {request.size}")
+        with translate_file_system_errors_to_grpc(context):
+            self.block_storage.write_block(request.block_id, data)
+        return pb.Empty()
 
     def DeleteBlock(self, request, context):
         """
@@ -271,7 +295,7 @@ def serve(peer_id, host, port, superpeer_address, capacity_bytes, data_directory
     #    Con bloques más grandes habría que subir ese límite o enviar el bloque en streaming.
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16),
                          interceptors=[RoleInterceptor(SUPERPEER_ONLY_METHODS)])
-    peer_servicer = Peer(peer_id, block_storage)
+    peer_servicer = Peer(peer_id, block_storage, tls_dir)
     rpc.add_PeerServicer_to_server(peer_servicer, server)
     server.add_secure_port(f"[::]:{port}", server_credentials(tls_dir))     # solo mTLS
     server.start()

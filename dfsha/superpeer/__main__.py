@@ -1,6 +1,7 @@
 import argparse
 import posixpath
 from concurrent import futures
+import threading
 import time
 
 import grpc
@@ -14,6 +15,8 @@ from dfsha.superpeer.dict_registry import DEFAULT_PENDING_PLAN_TTL_SECONDS, Dict
 from dfsha.superpeer.json_user_store import JsonUserStore
 from dfsha.superpeer.peer_tracker import PeerTracker
 from dfsha.superpeer.block_cleaner import DEFAULT_GRACE_SECONDS, DEFAULT_INTERVAL_SECONDS, BlockCleaner
+from dfsha.superpeer import replication_monitor
+from dfsha.superpeer.replication_monitor import ReplicationMonitor
 from dfsha.superpeer.persistent_registry import DEFAULT_SNAPSHOT_EVERY, PersistentRegistry
 from dfsha.superpeer.registry import BlockInfo
 from dfsha.common.tls import secure_channel, server_credentials
@@ -34,6 +37,8 @@ NODE_METHOD_ROLES = {
 }
 HEARTBEAT_INTERVAL_SECONDS = 3.0    # cada cuánto envían heartbeat los peers; muertos tras 3 perdidos (9 s)
 PING_TIMEOUT_SECONDS = 2.0          # cuánto espera RegisterPeer la respuesta del peer
+REPLICATE_TIMEOUT_SECONDS = 15.0    # una copia de re-replicación: el destino lee hasta 1 MiB del origen
+REPLICATION_TOKEN_SUBJECT = "replication"   # a nombre de quién va el permiso de lectura de una copia
 BLOCK_SIZE_BYTES = 1024 * 1024      # 1 MiB por bloque: el registro parte los archivos con este tamaño,
                                     # y un peer recibe bloques nuevos solo si le cabe al menos uno
 
@@ -297,7 +302,8 @@ def seed_demo_entries(registry):
 
 
 def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tls_dir, registry_dir, snapshot_every,
-          deletion_grace_seconds, cleaner_interval_seconds, pending_plan_ttl_seconds):
+          deletion_grace_seconds, cleaner_interval_seconds, pending_plan_ttl_seconds,
+          replication_delay_seconds, replication_interval_seconds):
     # La tabla de peers va primero: el registro la consulta para elegir dónde poner los bloques
     peer_tracker = PeerTracker(heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
 
@@ -320,18 +326,33 @@ def serve(node_id, port, demo, users_file, token_key_file, token_ttl_seconds, tl
     token_verifier = TokenVerifier(signing_key.public_key())
     user_store = JsonUserStore(users_file)    # para cambiar de almacén de usuarios, se cambia esta línea (y el import)
 
-    # Limpiador: borra en los peers los bloques obsoletos y los de planes vencidos, en segundo plano.
-    # Habla con los peers con el certificado de este superpeer: solo un superpeer puede usar DeleteBlock
+    # Limpiador y monitor de réplicas: trabajan en segundo plano y hablan con los peers con el
+    # certificado de este superpeer (solo un superpeer puede usar DeleteBlock y ReplicateBlock)
     peer_stubs = {}                            # dirección -> PeerStub: un canal por peer, reutilizado
+    peer_stubs_lock = threading.Lock()         # lo usan dos hilos: el limpiador y el monitor
+
+    def peer_stub(address):
+        with peer_stubs_lock:
+            if address not in peer_stubs:
+                peer_stubs[address] = rpc.PeerStub(secure_channel(address, tls_dir))
+            return peer_stubs[address]
 
     def delete_block_on_peer(address, block_id):
-        if address not in peer_stubs:
-            peer_stubs[address] = rpc.PeerStub(secure_channel(address, tls_dir))
-        peer_stubs[address].DeleteBlock(pb.BlockRequest(block_id=block_id), timeout=PING_TIMEOUT_SECONDS)
+        peer_stub(address).DeleteBlock(pb.BlockRequest(block_id=block_id), timeout=PING_TIMEOUT_SECONDS)
+
+    def replicate_block_on_peer(target_address, block_id, source_address, size):
+        # El destino le presenta este permiso al origen para leer el bloque, como haría un cliente
+        access_token = token_issuer.issue_block_token(REPLICATION_TOKEN_SUBJECT, block_id, "read")
+        request = pb.ReplicateBlockRequest(block_id=block_id, source_address=source_address,
+                                           access_token=access_token, size=size)
+        peer_stub(target_address).ReplicateBlock(request, timeout=REPLICATE_TIMEOUT_SECONDS)
 
     block_cleaner = BlockCleaner(peer_tracker, delete_block_on_peer, registry,
                                  grace_seconds=deletion_grace_seconds, interval_seconds=cleaner_interval_seconds)
     block_cleaner.start()
+    monitor = ReplicationMonitor(registry, peer_tracker, replicate_block_on_peer, block_cleaner,
+                                 delay_seconds=replication_delay_seconds, interval_seconds=replication_interval_seconds)
+    monitor.start()
 
     servicer = Superpeer(node_id, registry, peer_tracker, user_store, token_issuer, tls_dir, block_cleaner)
     # Primero el rol del nodo (certificado) y luego el usuario (token)
@@ -361,6 +382,10 @@ if __name__ == "__main__":
                    help="cada cuántos segundos el limpiador revisa su cola")
     p.add_argument("--pending-plan-ttl", type=float, default=DEFAULT_PENDING_PLAN_TTL_SECONDS,
                    help="segundos que vive un plan de escritura sin commit")
+    p.add_argument("--replication-delay", type=float, default=replication_monitor.DEFAULT_DELAY_SECONDS,
+                   help="segundos que un peer debe estar muerto para copiar sus bloques (y espera al arrancar)")
+    p.add_argument("--replication-interval", type=float, default=replication_monitor.DEFAULT_INTERVAL_SECONDS,
+                   help="cada cuántos segundos el monitor busca bloques subreplicados")
     a = p.parse_args()
     serve(a.id, a.port, a.demo, a.users_file, a.token_key, a.token_ttl, a.tls_dir, a.registry_dir, a.snapshot_every,
-          a.deletion_grace, a.cleaner_interval, a.pending_plan_ttl)
+          a.deletion_grace, a.cleaner_interval, a.pending_plan_ttl, a.replication_delay, a.replication_interval)

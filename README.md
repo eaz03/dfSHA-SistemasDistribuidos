@@ -36,6 +36,7 @@ Todo se ejecuta **desde la raíz del repositorio** con `python -m`, para que los
 | `dfsha/superpeer/persistent_registry.py` | Guarda el registro en disco: log de operaciones (con `fsync`) + snapshot; al arrancar lo reconstruye |
 | `dfsha/superpeer/peer_tracker.py` | Tabla de peers: dirección, espacio libre, vivo o muerto según sus heartbeats |
 | `dfsha/superpeer/block_cleaner.py` | Borra en segundo plano los bloques obsoletos (sobrescritos, borrados, planes vencidos), después de un período de gracia y reintentando en peers caídos |
+| `dfsha/superpeer/replication_monitor.py` | Devuelve a cada bloque las réplicas perdidas: si un peer muere (o se escribió con pocos peers), ordena copiar sus bloques de peer a peer (`ReplicateBlock`) |
 | `dfsha/superpeer/user_store.py` | Usuarios y contraseñas (hash scrypt); `json_user_store.py` los guarda en un JSON |
 | `dfsha/peer/__main__.py` | Peer: se registra, envía heartbeats y atiende `WriteBlock`/`ReadBlock`/`DeleteBlock` con permisos firmados |
 | `dfsha/peer/block_storage.py` | Interfaz del almacenamiento de bloques; `disk_block_storage.py` (disco) y `encrypted_block_storage.py` (AES-256-GCM) |

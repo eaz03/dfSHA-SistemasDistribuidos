@@ -38,6 +38,8 @@ service Peer {
   rpc WriteBlock(WriteBlockRequest) returns (Empty);    // cliente -> peer: guardar un bloque (reintentar es seguro)
   rpc ReadBlock(BlockRequest) returns (BlockData);      // cliente -> peer: leer un bloque
   rpc DeleteBlock(BlockRequest) returns (Empty);        // superpeer -> peer: borrar un bloque obsoleto (idempotente)
+  rpc ReplicateBlock(ReplicateBlockRequest) returns (Empty);   // superpeer -> peer: copiar un bloque desde otro peer
+                                                               // (re-replicación; los bytes van peer -> peer)
 }
 
 // ======================= Mensajes comunes =======================
@@ -123,6 +125,13 @@ message WriteBlockRequest {
   string block_id = 1;
   bytes  data = 2;               // hasta un bloque (1 MiB): cabe en el límite de 4 MB por mensaje de gRPC
   string access_token = 3;       // permiso de escritura que entregó el superpeer en el plan
+}
+
+message ReplicateBlockRequest {
+  string block_id = 1;
+  string source_address = 2;     // un peer que tiene el bloque: de ahí se lee con ReadBlock
+  string access_token = 3;       // permiso de lectura firmado por el superpeer, para presentárselo al origen
+  int64  size = 4;               // tamaño esperado: si lo leído no coincide, la copia se rechaza
 }
 
 message BlockData {
