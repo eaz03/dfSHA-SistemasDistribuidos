@@ -47,6 +47,35 @@ def block_from_dict(data):
     return BlockInfo(block_id=data["block_id"], size=data["size"], peer_ids=tuple(data["peer_ids"]))
 
 
+def _export_namespace(user_namespace):
+    """El espacio de nombres de un usuario {path: entrada} -> datos guardables en JSON."""
+    exported_namespace = {}
+    for path, entry in user_namespace.items():
+        exported_entry = {"is_dir": entry["is_dir"], "size": entry["size"], "mtime": entry["mtime"]}
+        if not entry["is_dir"]:
+            exported_blocks = []
+            for block in entry["blocks"]:
+                exported_blocks.append(block_to_dict(block))
+            exported_entry["blocks"] = exported_blocks
+        exported_namespace[path] = exported_entry
+    return exported_namespace
+
+
+def _import_namespace(exported_namespace):
+    """Lo contrario de _export_namespace."""
+    user_namespace = {}
+    for path, exported_entry in exported_namespace.items():
+        entry = {"is_dir": exported_entry["is_dir"], "size": exported_entry["size"],
+                 "mtime": exported_entry["mtime"]}
+        if not entry["is_dir"]:
+            blocks = []
+            for exported_block in exported_entry["blocks"]:
+                blocks.append(block_from_dict(exported_block))
+            entry["blocks"] = blocks
+        user_namespace[path] = entry
+    return user_namespace
+
+
 @dataclass(frozen=True)
 class _PendingBlock:
     """Un bloque asignado por allocate_blocks que todavía no tiene commit (interno: no sale del registro)."""
@@ -438,27 +467,28 @@ class DictRegistry(Registry):
         with self._lock:
             namespaces = {}
             for user, user_namespace in self._namespaces.items():
-                namespaces[user] = {}
-                for path, entry in user_namespace.items():
-                    exported_entry = {"is_dir": entry["is_dir"], "size": entry["size"], "mtime": entry["mtime"]}
-                    if not entry["is_dir"]:
-                        exported_entry["blocks"] = [block_to_dict(block) for block in entry["blocks"]]
-                    namespaces[user][path] = exported_entry
+                namespaces[user] = _export_namespace(user_namespace)
             return {"namespaces": namespaces}
 
     def import_state(self, state):
         with self._lock:
             namespaces = {}
             for user, exported_namespace in state["namespaces"].items():
-                namespaces[user] = {}
-                for path, exported_entry in exported_namespace.items():
-                    entry = {"is_dir": exported_entry["is_dir"], "size": exported_entry["size"],
-                             "mtime": exported_entry["mtime"]}
-                    if not entry["is_dir"]:
-                        entry["blocks"] = [block_from_dict(block) for block in exported_entry["blocks"]]
-                    namespaces[user][path] = entry
+                namespaces[user] = _import_namespace(exported_namespace)
             self._namespaces = namespaces
             self._pending_blocks = {}        # los planes no se guardan: son estado temporal
+
+    def export_user_state(self, user):
+        with self._lock:
+            return _export_namespace(self._namespace(user))
+
+    def import_user_state(self, user, state):
+        with self._lock:
+            self._namespaces[user] = _import_namespace(state)
+            # Los planes de ese usuario eran de la versión reemplazada: un commit suyo ya no debe valer
+            for block_id, pending in list(self._pending_blocks.items()):
+                if pending.user == user:
+                    del self._pending_blocks[block_id]
 
     def under_replicated_blocks(self, available_peer_ids):
         available_peer_ids = set(available_peer_ids)

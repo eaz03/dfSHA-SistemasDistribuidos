@@ -63,6 +63,7 @@ TLS comprueba que la dirección a la que uno se conecta esté en el certificado 
 
 ```bash
 python -m tools.make_certs issue superpeer sp1   --san 10.8.0.1
+python -m tools.make_certs issue superpeer sp2   --san 10.8.0.2
 python -m tools.make_certs issue peer      peer1 --san 10.8.0.5
 python -m tools.make_certs issue peer      peer2 --san 10.8.0.6
 python -m tools.make_certs issue client    cliente-sofi           # una por máquina cliente
@@ -102,7 +103,9 @@ los mismos argumentos en el `command` del servicio, y los volúmenes `/data` y `
 **Superpeer** (`10.8.0.1`):
 ```bash
 python -m dfsha.superpeer --id sp1 --port 7000 --tls-dir certs/sp1 \
+    --superpeers sp1=10.8.0.1:7000,sp2=10.8.0.2:7000 \
     --users-file /data/users.json --token-key /keys/token.key
+# en la VM de sp2: lo mismo con --id sp2 y certs/sp2 (la lista --superpeers es la misma en todos)
 ```
 Crear los usuarios en esa misma VM (pide la contraseña sin mostrarla):
 ```bash
@@ -111,14 +114,14 @@ python -m tools.manage_users --file /data/users.json add sofi
 
 **Peer** (`10.8.0.5`), con su propia IP en `--host` (es la que anuncia al superpeer y la que está en su certificado):
 ```bash
-python -m dfsha.peer --id peer1 --host 10.8.0.5 --port 7100 --superpeer 10.8.0.1:7000 \
+python -m dfsha.peer --id peer1 --host 10.8.0.5 --port 7100 --superpeer 10.8.0.1:7000,10.8.0.2:7000 \
     --capacity-mb 1024 --data-dir /data --tls-dir certs/peer1
 ```
 
 **Cliente** (montaje FUSE):
 ```bash
 export DFSHA_USER=sofi DFSHA_PASSWORD='...' DFSHA_TLS_DIR=certs/cliente-sofi
-python -m dfsha.client.mount 10.8.0.1:7000 /mnt/dfsha
+python -m dfsha.client.mount 10.8.0.1:7000,10.8.0.2:7000 /mnt/dfsha
 ```
 
 Comprobar:

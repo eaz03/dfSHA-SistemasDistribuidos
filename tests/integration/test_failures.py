@@ -5,8 +5,8 @@ re-replicación y borrado de bloques obsoletos.
 
 Se ejecuta fuera de los contenedores (en WSL o en la terminal del host), desde la raíz del repositorio:
   python3 -m tests.integration.test_failures
-Solo usa la biblioteca estándar: controla los contenedores con 'docker compose'. Levanta el superpeer
-con los tiempos cortos de compose.fast.yml y al terminar lo deja otra vez con los normales.
+Solo usa la biblioteca estándar: controla los contenedores con 'docker compose'. Levanta los superpeers
+con los tiempos cortos de compose.fast.yml y al terminar los deja otra vez con los normales.
 Usa las credenciales del contenedor client (las del .env). Tarda unos 2 minutos.
 """
 
@@ -17,6 +17,7 @@ import time
 
 COMPOSE_FILES = ["-f", "docker-compose.yml", "-f", "tests/integration/compose.fast.yml"]
 PEERS = ["peer1", "peer2", "peer3"]
+SUPERPEERS = ["sp1", "sp2"]
 REMOTE_PATH = "/test-failures.bin"
 DEAD_AFTER_SECONDS = 9          # 3 heartbeats perdidos (peer_tracker)
 REPLICATION_DELAY_SECONDS = 10  # compose.fast.yml
@@ -96,9 +97,9 @@ def main():
     try:
         run_cases()
     finally:
-        print("restoring the normal superpeer and all peers...")
+        print("restoring the normal superpeers and all peers...")
         compose("start", *PEERS)
-        compose("up", "-d", "--force-recreate", "sp1", files=[])
+        compose("up", "-d", "--force-recreate", *SUPERPEERS, files=[])
         try:
             in_client(CLIENT + f"client.rm({REMOTE_PATH!r})")
         except RuntimeError:

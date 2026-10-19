@@ -12,7 +12,7 @@ Uso, desde WSL (dentro de los contenedores, la carpeta del proyecto se ve en /ap
   docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md     subir un archivo local
   docker compose exec client python -m dfsha.client.dfs_cli get /readme.md /tmp/readme.md     bajar un archivo
   docker compose exec client python -m dfsha.client.dfs_cli blocks /readme.md                 ver sus bloques y réplicas
-Opción: --superpeer sp1:7000 (varias direcciones separadas por comas).
+Opción: --superpeer sp1:7000,sp2:7000 (por defecto, la variable DFSHA_SUPERPEERS o esas dos).
 """
 
 import argparse
@@ -21,7 +21,7 @@ import sys
 
 import grpc
 
-from dfsha.client.auth_client import credentials_from_environment
+from dfsha.client.auth_client import credentials_from_environment, superpeers_from_environment
 
 from dfsha.client.client import DFSClient
 from dfsha.common.errors import FileSystemError, errno_from_rpc_error
@@ -74,7 +74,8 @@ def command_blocks(client, remote_path):
 
 def main():
     parser = argparse.ArgumentParser(description="DFSha sin FUSE: put / get / blocks")
-    parser.add_argument("--superpeer", default="sp1:7000", help="dirección del superpeer (varias, separadas por comas)")
+    parser.add_argument("--superpeer", default=",".join(superpeers_from_environment()),
+                        help="direcciones de los superpeers, separadas por comas (por defecto DFSHA_SUPERPEERS)")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     put_parser = subcommands.add_parser("put", help="subir un archivo local")

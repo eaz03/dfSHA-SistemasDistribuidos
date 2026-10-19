@@ -172,6 +172,19 @@ docker compose exec client python -m dfsha.client.dfs_cli blocks /readme.md     
 docker compose exec client python -m dfsha.client.dfs_cli get /readme.md /tmp/readme.md   # bajar
 ```
 
+## Superpeers
+
+Hay dos superpeers (`sp1` y `sp2`) federados: cada usuario tiene un dueño (su *home*, o `sp1` por
+defecto), el otro guarda una copia al día de su registro y lo atiende si el dueño cae.
+
+```bash
+docker compose exec client python -m tools.superpeers_status        # quién está vivo, a quién atiende cada uno
+docker compose run --rm sp1 python -m tools.manage_users add luis --home sp2   # un usuario atendido por sp2
+```
+
+Al crear usuarios, escribir la contraseña en la terminal: si se canaliza desde Windows, el salto de
+línea puede llegar como `CR LF` y la contraseña quedaría con un carácter invisible.
+
 ## Pruebas
 
 ```bash
@@ -188,6 +201,7 @@ docker compose exec client python -m tests.integration.test_superpeer_blocks # p
 python3 -m tests.integration.test_peers      # registro, caída y regreso de un peer, reinicio del superpeer (~1 min)
 python3 -m tests.integration.test_failures   # persistencia, réplica alternativa, re-replicación, limpieza (~2 min)
 python3 -m tests.integration.test_mount     # montaje FUSE: cat, cp, >, >>, truncate, sed -i, archivos abiertos, peers caídos (~30 s)
+python3 -m tests.integration.test_superpeers # federación: dos superpeers activos, failover con el montaje en uso, regresos (~1,5 min)
 ```
 
 ## Mediciones

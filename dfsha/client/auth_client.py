@@ -34,6 +34,19 @@ def credentials_from_environment():
     return username, password, os.environ.get("DFSHA_TLS_DIR", DEFAULT_CLIENT_TLS_DIR)
 
 
+DEFAULT_SUPERPEERS = "sp1:7000,sp2:7000"
+
+
+def superpeers_from_environment():
+    """Las direcciones de los superpeers para las herramientas: DFSHA_SUPERPEERS, o las del docker-compose."""
+    addresses = []
+    for item in os.environ.get("DFSHA_SUPERPEERS", DEFAULT_SUPERPEERS).split(","):
+        item = item.strip()
+        if item != "":
+            addresses.append(item)
+    return addresses
+
+
 def authenticated_superpeer_stub(address, username, password, tls_dir, timeout=5):
     """SuperpeerStub por mTLS que hace Login y adjunta el token en cada llamada (para scripts y pruebas)."""
     channel = secure_channel(address, tls_dir)
@@ -56,6 +69,7 @@ class LoginSession:
         self._timeout = timeout
         self._lock = threading.Lock()     # varios hilos podrían pedir el token a la vez
         self._token = None
+        self.owner_address = ""           # el superpeer que atiende a este usuario, según el último Login
 
     def token(self):
         """El token actual; hace Login la primera vez. Lanza grpc.RpcError (UNAUTHENTICATED) si las credenciales no sirven."""
@@ -78,6 +92,7 @@ class LoginSession:
         login_request = pb.LoginRequest(username=self._username, password=self._password)
         login_reply = self._superpeer_stub.Login(login_request, timeout=self._timeout)
         self._token = login_reply.token
+        self.owner_address = login_reply.owner_address
 
 
 class _CallDetails(grpc.ClientCallDetails):

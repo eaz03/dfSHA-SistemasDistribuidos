@@ -1,7 +1,11 @@
-# Tiempos cortos para las pruebas de fallas (test_failures.py): los mismos servicios, con un
-# superpeer que borra y re-replica en segundos en vez de minutos. No usar fuera de las pruebas.
+# Tiempos cortos para las pruebas de fallas (test_failures.py): los mismos servicios, con superpeers
+# que borran y re-replican en segundos en vez de minutos. No usar fuera de las pruebas.
 services:
   sp1:
     command: >-
-      python -m dfsha.superpeer --id sp1 --port 7000 --demo --tls-dir certs/sp1
-      --deletion-grace 3 --cleaner-interval 1 --replication-delay 10 --replication-interval 2
+      python -m dfsha.superpeer --id sp1 --port 7000 --superpeers sp1=sp1:7000,sp2=sp2:7000 --demo
+      --tls-dir certs/sp1 --deletion-grace 3 --cleaner-interval 1 --replication-delay 10 --replication-interval 2
+  sp2:
+    command: >-
+      python -m dfsha.superpeer --id sp2 --port 7000 --superpeers sp1=sp1:7000,sp2=sp2:7000
+      --tls-dir certs/sp2 --deletion-grace 3 --cleaner-interval 1 --replication-delay 10 --replication-interval 2

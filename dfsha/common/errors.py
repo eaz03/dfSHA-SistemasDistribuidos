@@ -41,6 +41,9 @@ GRPC_CODE_FOR_ERRNO = {
     errno.EACCES: grpc.StatusCode.PERMISSION_DENIED,         # Permission denied
     errno.ENOTEMPTY: grpc.StatusCode.FAILED_PRECONDITION,    # Directory not empty
     errno.ENOSPC: grpc.StatusCode.RESOURCE_EXHAUSTED,        # No space left on device (faltan peers)
+    # Resource temporarily unavailable: este superpeer no atiende a ese usuario ahora. UNAVAILABLE,
+    # como un superpeer caído, para que el cliente haga lo mismo: cambiarse al que lo atiende
+    errno.EAGAIN: grpc.StatusCode.UNAVAILABLE,
 }
 
 # código gRPC -> errno, solo para cuando NO llegó metadata (p. ej. el superpeer está caído).
