@@ -13,7 +13,7 @@ import errno
 import re
 from abc import ABC, abstractmethod
 
-from errors import FileSystemError
+from dfsha.common.errors import FileSystemError
 
 # El registro genera los IDs con uuid4().hex: 32 caracteres hexadecimales en minúscula.
 # Se acepta solo eso (lista blanca): así un ID como "../../etc/passwd" nunca llega a ser un path.

@@ -152,5 +152,5 @@ Fuera del camino crítico (Fase A, pasos 1 a 4), estas líneas pueden avanzar al
 **Coordinación:** `dfsha.proto` es compartido por todas las líneas. Cada una agrega sus propios mensajes y RPC sin renumerar los existentes, y regenera el código gRPC después de cada cambio:
 
 ```bash
-docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha.proto
+docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha/proto/dfsha.proto
 ```

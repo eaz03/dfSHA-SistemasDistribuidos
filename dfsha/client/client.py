@@ -13,11 +13,11 @@ from concurrent import futures
 
 import grpc
 
-import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
-from auth_client import BearerTokenInterceptor, LoginSession
-from errors import FileSystemError, errno_from_rpc_error
-from tls import secure_channel
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.proto import dfsha_pb2_grpc as rpc
+from dfsha.client.auth_client import BearerTokenInterceptor, LoginSession
+from dfsha.common.errors import FileSystemError, errno_from_rpc_error
+from dfsha.common.tls import secure_channel
 
 PARALLEL_BLOCK_TRANSFERS = 4      # bloques que se bajan o suben a la vez (en general, a peers distintos)
 

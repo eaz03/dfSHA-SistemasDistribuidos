@@ -8,27 +8,38 @@ Proyecto 1 de Sistemas Distribuidos (SI3007), Universidad EAFIT, 2026-2.
 > Los peers se registran en el superpeer y envían heartbeats; el superpeer detecta cuándo caen.
 > La lectura y escritura del contenido de los archivos (bloques en los peers) está en desarrollo.
 
-## Componentes
+## Estructura
 
-| Archivo | Rol |
+```
+dfsha/                  el código del sistema: un subpaquete por tipo de nodo
+  proto/                dfsha.proto: contrato gRPC de todos los servicios (el código generado no va a git)
+  common/               lo que comparten los nodos: errores, mTLS, tokens JWT, claves, interceptores
+  superpeer/            superpeer (python -m dfsha.superpeer): registro de metadatos, tabla de peers, usuarios
+  peer/                 peer (python -m dfsha.peer): guarda y entrega bloques (cifrados en disco)
+  client/               cliente: DFSClient, montaje FUSE (python -m dfsha.client.mount) y CLI sin FUSE
+tools/                  administración: certificados, usuarios, estado de los peers (python -m tools.<nombre>)
+tests/                  pruebas de integración sobre los contenedores (python -m tests.<nombre>)
+docs/                   arquitectura, plan de trabajo y guía de despliegue
+Dockerfile, docker-compose.yml   imagen y contenedores: sp1, peer1..peer3 y client
+```
+
+Todo se ejecuta **desde la raíz del repositorio** con `python -m`, para que los imports
+(`from dfsha.common.errors import ...`) funcionen igual en cualquier máquina.
+
+| Módulo | Rol |
 |---|---|
-| `mount.py` | Cliente. Monta DFSha como una carpeta común (FUSE): cualquier programa (`ls`, `cd`, `mkdir`...) la usa sin saber que es remota |
-| `client.py` | `DFSClient`: envía las operaciones al superpeer por gRPC |
-| `superpeer.py` | Servidor gRPC del superpeer: recibe cada operación y la aplica al registro de metadatos; registra a los peers |
-| `peer_tracker.py` | Tabla de peers del superpeer: dirección, espacio libre, vivo o muerto según sus heartbeats |
-| `peer.py` | Peer: se registra en el superpeer, envía heartbeats y (próximamente) guarda bloques |
-| `registry.py` | Contrato (interfaz) del registro de metadatos |
-| `dict_registry.py` | Implementación actual del registro: diccionarios en memoria |
-| `persistent_registry.py` | Envuelve al registro y lo guarda en disco: log de operaciones (con `fsync`) + snapshot; al arrancar lo reconstruye |
-| `errors.py` | Errores de sistema de archivos y su traducción entre capas (registro, red, kernel) |
-| `dfsha.proto` | Contrato de comunicación gRPC: servicios `Superpeer` y `Peer` |
-| `peers_status.py` | Muestra la tabla de peers del superpeer |
-| `test_peers.py` | Prueba automática de la conexión peer ↔ superpeer |
-| `block_storage.py`, `disk_block_storage.py` | Almacenamiento de bloques del peer: interfaz e implementación en disco |
-| `test_peer_blocks.py` | Prueba de la API de bloques de los peers (escribir, leer, borrar) |
-| `test_superpeer_blocks.py` | Prueba de plan, commit y ubicaciones de bloques en el superpeer (sube y relee un archivo a mano) |
-| `dfs_cli.py` | Temporal: subir (`put`), bajar (`get`) y ver los bloques (`blocks`) de un archivo sin FUSE, mientras el mount no escribe |
-| `Dockerfile`, `docker-compose.yml` | Imagen y contenedores: `sp1` (superpeer), `peer1`..`peer3` (peers) y `client` (montaje) |
+| `dfsha/client/mount.py` | Monta DFSha como una carpeta común (FUSE): cualquier programa (`ls`, `cd`, `mkdir`...) la usa sin saber que es remota |
+| `dfsha/client/client.py` | `DFSClient`: habla con el superpeer (metadatos) y directo con los peers (bloques) |
+| `dfsha/client/dfs_cli.py` | Temporal: subir (`put`), bajar (`get`) y ver los bloques (`blocks`) de un archivo sin FUSE |
+| `dfsha/superpeer/__main__.py` | Servidor gRPC del superpeer: login, operaciones del registro, registro de peers, plan y ubicación de bloques |
+| `dfsha/superpeer/registry.py` | Contrato (interfaz) del registro de metadatos; `dict_registry.py` lo implementa en memoria |
+| `dfsha/superpeer/persistent_registry.py` | Guarda el registro en disco: log de operaciones (con `fsync`) + snapshot; al arrancar lo reconstruye |
+| `dfsha/superpeer/peer_tracker.py` | Tabla de peers: dirección, espacio libre, vivo o muerto según sus heartbeats |
+| `dfsha/superpeer/user_store.py` | Usuarios y contraseñas (hash scrypt); `json_user_store.py` los guarda en un JSON |
+| `dfsha/peer/__main__.py` | Peer: se registra, envía heartbeats y atiende `WriteBlock`/`ReadBlock`/`DeleteBlock` con permisos firmados |
+| `dfsha/peer/block_storage.py` | Interfaz del almacenamiento de bloques; `disk_block_storage.py` (disco) y `encrypted_block_storage.py` (AES-256-GCM) |
+| `dfsha/common/errors.py` | Errores de sistema de archivos y su traducción entre capas (registro, red, kernel) |
+| `dfsha/common/tls.py`, `auth_tokens.py`, `auth_interceptor.py` | mTLS, tokens JWT (sesión y permisos de bloque) e interceptores de acceso |
 
 Flujo de una operación, por ejemplo `ls /mnt/dfsha/docs`:
 
@@ -52,15 +63,15 @@ docker compose build
 
 # 2. Generar el código gRPC (dfsha_pb2.py y dfsha_pb2_grpc.py).
 #    No está en el repositorio: se genera a partir de dfsha.proto.
-docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha.proto
+docker compose run --rm sp1 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. dfsha/proto/dfsha.proto
 
 # 3. Generar los certificados TLS: una CA propia y uno por nodo (sp1, peer1, client).
 #    Toda comunicación va cifrada y con certificado en ambas puntas (mTLS). certs/ no va a git.
-docker compose run --rm sp1 python make_certs.py dev
+docker compose run --rm sp1 python -m tools.make_certs dev
 
 # 4. Crear un usuario (pide la contraseña sin mostrarla) y darle sus credenciales al montaje.
 #    --demo crea archivos de ejemplo para el usuario "demo".
-docker compose run --rm sp1 python manage_users.py add demo
+docker compose run --rm sp1 python -m tools.manage_users add demo
 cp .env.example .env                   # y poner en .env la contraseña elegida (.env no va a git)
 
 # 5. Arrancar el superpeer, el peer y el cliente
@@ -99,9 +110,9 @@ snapshot en el volumen `sp1-data`): sobrevive a reinicios y a `down`; `docker co
 Cada usuario tiene su propio espacio de nombres: solo ve sus archivos.
 
 ```bash
-docker compose run --rm sp1 python manage_users.py add sofi      # crear
-docker compose run --rm sp1 python manage_users.py list          # listar
-docker compose run --rm sp1 python manage_users.py remove sofi   # borrar
+docker compose run --rm sp1 python -m tools.manage_users add sofi      # crear
+docker compose run --rm sp1 python -m tools.manage_users list          # listar
+docker compose run --rm sp1 python -m tools.manage_users remove sofi   # borrar
 
 # Montar como otro usuario sin editar .env:
 DFSHA_USER=sofi DFSHA_PASSWORD=... docker compose up -d client
@@ -116,8 +127,8 @@ Todos los nodos confían en la CA de `certs/`, no en una lista de nodos. Para ag
 con emitirle un certificado (los demás no cambian ni se reinician) y arrancarlo con `--tls-dir certs/<nombre>`:
 
 ```bash
-docker compose run --rm sp1 python make_certs.py issue peer peer2 --san peer2
-docker compose run --rm sp1 python make_certs.py issue peer peer3 --san 10.8.0.7   # en una VM: su IP de la VPN
+docker compose run --rm sp1 python -m tools.make_certs issue peer peer2 --san peer2
+docker compose run --rm sp1 python -m tools.make_certs issue peer peer3 --san 10.8.0.7   # en una VM: su IP de la VPN
 ```
 
 El rol del certificado (`superpeer`, `peer`, `client`) limita qué puede hacer cada nodo: p. ej. solo
@@ -126,21 +137,21 @@ Los certificados de los nodos duran 90 días y la CA un año. En una VM se copia
 `node.key`, `node.crt` y `ca.crt` de su carpeta: `ca.key` nunca sale de donde se emiten.
 
 Para desplegar en máquinas virtuales (CA, certificados por IP de la VPN, usuarios, renovación y
-qué hacer si algo se compromete), seguir [DESPLIEGUE.md](DESPLIEGUE.md).
+qué hacer si algo se compromete), seguir [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
 
 ## Peers
 
 ```bash
 # Las herramientas hablan con el superpeer como un cliente más (login + certificado): se ejecutan
 # en el contenedor client, que tiene las credenciales del .env y el certificado de cliente
-docker compose exec client python peers_status.py  # tabla de peers: dirección, espacio libre, vivo o muerto
+docker compose exec client python -m tools.peers_status  # tabla de peers: dirección, espacio libre, vivo o muerto
 docker compose logs -f peer1                        # registro, reintentos y re-registros del peer
-python3 test_peers.py                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
-docker compose exec client python test_peer_blocks.py  # API de bloques de peer1, peer2 y peer3 (~5 s)
-docker compose exec client python test_superpeer_blocks.py  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
-docker compose exec client python dfs_cli.py put /app/README.md /readme.md   # subir (en /app está la carpeta del proyecto)
-docker compose exec client python dfs_cli.py blocks /readme.md               # bloques y en qué peers está cada uno
-docker compose exec client python dfs_cli.py get /readme.md /tmp/readme.md   # bajar
+python3 -m tests.test_peers                               # prueba automática (en WSL, ~1 min; deja sp1 y peer1 corriendo)
+docker compose exec client python -m tests.test_peer_blocks  # API de bloques de peer1, peer2 y peer3 (~5 s)
+docker compose exec client python -m tests.test_superpeer_blocks  # AllocateBlocks, CommitFile, GetBlockLocations (~2 s)
+docker compose exec client python -m dfsha.client.dfs_cli put /app/README.md /readme.md   # subir (en /app está la carpeta del proyecto)
+docker compose exec client python -m dfsha.client.dfs_cli blocks /readme.md               # bloques y en qué peers está cada uno
+docker compose exec client python -m dfsha.client.dfs_cli get /readme.md /tmp/readme.md   # bajar
 ```
 
 ## Desarrollo

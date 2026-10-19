@@ -19,8 +19,8 @@ import secrets
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from block_storage import BlockStorage, validate_block_id
-from errors import FileSystemError
+from dfsha.peer.block_storage import BlockStorage, validate_block_id
+from dfsha.common.errors import FileSystemError
 
 FORMAT_VERSION = b"\x01"     # permite cambiar el formato después (p. ej. rotar claves) y seguir leyendo los viejos
 NONCE_BYTES = 12             # el tamaño estándar para GCM

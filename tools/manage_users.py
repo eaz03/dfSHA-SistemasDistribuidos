@@ -1,9 +1,9 @@
 """
 Administración de usuarios de DFSha desde la terminal.
 
-    docker compose run --rm sp1 python manage_users.py --file /data/users.json add sofi
-    docker compose run --rm sp1 python manage_users.py --file /data/users.json list
-    docker compose run --rm sp1 python manage_users.py --file /data/users.json remove sofi
+    docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json add sofi
+    docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json list
+    docker compose run --rm sp1 python -m tools.manage_users --file /data/users.json remove sofi
 
 La contraseña se pide con getpass (no se ve al escribirla) y nunca se recibe como argumento:
 un argumento queda en el historial de la terminal y en la lista de procesos (ps).
@@ -13,7 +13,7 @@ import argparse
 import getpass
 import sys
 
-from json_user_store import JsonUserStore
+from dfsha.superpeer.json_user_store import JsonUserStore
 
 DEFAULT_USERS_FILE = "/data/users.json"
 

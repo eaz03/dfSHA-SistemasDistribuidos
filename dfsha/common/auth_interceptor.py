@@ -15,8 +15,8 @@ import contextvars
 
 import grpc
 
-from auth_tokens import InvalidTokenError
-from tls import caller_role
+from dfsha.common.auth_tokens import InvalidTokenError
+from dfsha.common.tls import caller_role
 
 AUTHORIZATION_METADATA_KEY = "authorization"     # gRPC exige las llaves de metadata en minúscula
 BEARER_PREFIX = "Bearer "                        # mismo formato que el encabezado Authorization de HTTP

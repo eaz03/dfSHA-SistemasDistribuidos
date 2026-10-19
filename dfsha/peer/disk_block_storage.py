@@ -13,8 +13,8 @@ import errno
 import os
 import uuid
 
-from block_storage import BlockStorage, validate_block_id
-from errors import FileSystemError
+from dfsha.peer.block_storage import BlockStorage, validate_block_id
+from dfsha.common.errors import FileSystemError
 
 TEMPORARY_MARKER = ".tmp-"           # "<block_id>.tmp-<uuid>": un bloque que se está escribiendo
 

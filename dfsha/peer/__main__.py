@@ -25,15 +25,15 @@ from concurrent import futures
 
 import grpc
 
-import dfsha_pb2 as pb
-import dfsha_pb2_grpc as rpc
-from auth_interceptor import RoleInterceptor
-from auth_tokens import InvalidTokenError, TokenVerifier, WrongBlockPermissionError, load_verification_key_from_pem
-from disk_block_storage import DiskBlockStorage
-from encrypted_block_storage import EncryptedBlockStorage
-from errors import translate_file_system_errors_to_grpc
-from key_files import load_or_create_secret_key
-from tls import caller_role, secure_channel, server_credentials
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.proto import dfsha_pb2_grpc as rpc
+from dfsha.common.auth_interceptor import RoleInterceptor
+from dfsha.common.auth_tokens import InvalidTokenError, TokenVerifier, WrongBlockPermissionError, load_verification_key_from_pem
+from dfsha.peer.disk_block_storage import DiskBlockStorage
+from dfsha.peer.encrypted_block_storage import EncryptedBlockStorage
+from dfsha.common.errors import translate_file_system_errors_to_grpc
+from dfsha.common.key_files import load_or_create_secret_key
+from dfsha.common.tls import caller_role, secure_channel, server_credentials
 
 REGISTER_TIMEOUT_SECONDS = 5.0      # mayor que el Ping que hace el superpeer durante el registro (2 s)
 HEARTBEAT_TIMEOUT_SECONDS = 2.0

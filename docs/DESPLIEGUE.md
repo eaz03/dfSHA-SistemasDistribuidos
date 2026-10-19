@@ -44,8 +44,8 @@ en el handshake, antes de cualquier RPC.
 En la máquina de administración, desde la carpeta del repositorio:
 
 ```bash
-docker compose run --rm sp1 python make_certs.py init
-# o, con Python local: python make_certs.py init
+docker compose run --rm sp1 python -m tools.make_certs init
+# o, con Python local, desde la raíz del repositorio: python -m tools.make_certs init
 ```
 
 Crea `certs/ca.key` y `certs/ca.crt` (válida 1 año).
@@ -62,10 +62,10 @@ Uno por nodo, con su nombre y **la IP con la que los demás se conectan a él** 
 TLS comprueba que la dirección a la que uno se conecta esté en el certificado del otro.
 
 ```bash
-python make_certs.py issue superpeer sp1   --san 10.8.0.1
-python make_certs.py issue peer      peer1 --san 10.8.0.5
-python make_certs.py issue peer      peer2 --san 10.8.0.6
-python make_certs.py issue client    cliente-sofi           # una por máquina cliente
+python -m tools.make_certs issue superpeer sp1   --san 10.8.0.1
+python -m tools.make_certs issue peer      peer1 --san 10.8.0.5
+python -m tools.make_certs issue peer      peer2 --san 10.8.0.6
+python -m tools.make_certs issue client    cliente-sofi           # una por máquina cliente
 ```
 
 (Con Docker: anteponer `docker compose run --rm sp1` a cada comando.)
@@ -96,29 +96,29 @@ Comprobar que en la VM quedó exactamente esto y nada más:
 
 ## 6. Arrancar cada nodo
 
-Ejemplo con los programas directamente (si se usa Docker en la VM, son los mismos argumentos en
-el `command` del servicio, y los volúmenes `/data` y `/keys` deben ser persistentes):
+Ejemplo con los programas directamente, desde la raíz del repositorio (si se usa Docker en la VM, son
+los mismos argumentos en el `command` del servicio, y los volúmenes `/data` y `/keys` deben ser persistentes):
 
 **Superpeer** (`10.8.0.1`):
 ```bash
-python superpeer.py --id sp1 --port 7000 --tls-dir certs/sp1 \
+python -m dfsha.superpeer --id sp1 --port 7000 --tls-dir certs/sp1 \
     --users-file /data/users.json --token-key /keys/token.key
 ```
 Crear los usuarios en esa misma VM (pide la contraseña sin mostrarla):
 ```bash
-python manage_users.py --file /data/users.json add sofi
+python -m tools.manage_users --file /data/users.json add sofi
 ```
 
 **Peer** (`10.8.0.5`), con su propia IP en `--host` (es la que anuncia al superpeer y la que está en su certificado):
 ```bash
-python peer.py --id peer1 --host 10.8.0.5 --port 7100 --superpeer 10.8.0.1:7000 \
+python -m dfsha.peer --id peer1 --host 10.8.0.5 --port 7100 --superpeer 10.8.0.1:7000 \
     --capacity-mb 1024 --data-dir /data --tls-dir certs/peer1
 ```
 
 **Cliente** (montaje FUSE):
 ```bash
 export DFSHA_USER=sofi DFSHA_PASSWORD='...' DFSHA_TLS_DIR=certs/cliente-sofi
-python mount.py 10.8.0.1:7000 /mnt/dfsha
+python -m dfsha.client.mount 10.8.0.1:7000 /mnt/dfsha
 ```
 
 Comprobar:
@@ -137,7 +137,7 @@ openssl x509 -in certs/peer1/node.crt -noout -subject -enddate
 
 **Renovar** (antes de los 90 días; el proyecto dura menos, pero por si acaso):
 ```bash
-python make_certs.py issue peer peer1 --san 10.8.0.5 --force
+python -m tools.make_certs issue peer peer1 --san 10.8.0.5 --force
 ```
 y repetir las secciones 5 y 6 (copiar y reiniciar ese nodo).
 

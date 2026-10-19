@@ -2,16 +2,16 @@
 Muestra la tabla de peers del superpeer (RPC ListPeers).
 
 Uso, desde WSL en la carpeta del proyecto:
-  docker compose exec client python peers_status.py           tabla legible
-  docker compose exec client python peers_status.py --json    JSON, para scripts (lo usa test_peers.py)
+  docker compose exec client python -m tools.peers_status           tabla legible
+  docker compose exec client python -m tools.peers_status --json    JSON, para scripts (lo usa test_peers.py)
 ListPeers pide token: usa las credenciales del montaje (DFSHA_USER, DFSHA_PASSWORD, DFSHA_TLS_DIR).
 """
 
 import argparse
 import json
 
-import dfsha_pb2 as pb
-from auth_client import authenticated_superpeer_stub, credentials_from_environment
+from dfsha.proto import dfsha_pb2 as pb
+from dfsha.client.auth_client import authenticated_superpeer_stub, credentials_from_environment
 
 BYTES_PER_MB = 1024 * 1024
 

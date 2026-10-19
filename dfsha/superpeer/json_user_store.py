@@ -17,7 +17,7 @@ import os
 import threading
 import uuid
 
-from user_store import UserStore, hash_password, validate_password, validate_username
+from dfsha.superpeer.user_store import UserStore, hash_password, validate_password, validate_username
 
 
 class JsonUserStore(UserStore):
